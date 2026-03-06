@@ -15,7 +15,7 @@
 
 ---
 
-## MCP Tools (11)
+## MCP Tools (16)
 
 ### Indexing Tools
 
@@ -133,11 +133,13 @@ Returns a list of symbols plus an error list for any IDs not found.
   "kind": "function",
   "language": "python",
   "file_pattern": "src/**/*.py",
-  "max_results": 10
+  "max_results": 10,
+  "offset": 0,
+  "exhaustive": false
 }
 ```
 
-Weighted scoring search across name, signature, summary, keywords, and docstring. All filters are optional.
+Weighted scoring search across name, signature, summary, keywords, and docstring. All filters are optional. Response includes `total_hits`; if it exceeds `result_count`, use `offset` to paginate or `exhaustive: true` to retrieve all matches ignoring the cap.
 
 #### `search_text` — Full-text search across file contents
 
@@ -146,11 +148,81 @@ Weighted scoring search across name, signature, summary, keywords, and docstring
   "repo": "owner/repo",
   "query": "TODO",
   "file_pattern": "*.py",
-  "max_results": 20
+  "max_results": 20,
+  "offset": 0,
+  "exhaustive": false,
+  "exact": false
 }
 ```
 
-Case-insensitive substring search across indexed file contents. Returns matching lines with file, line number, and surrounding context. Use when symbol search misses (string literals, comments, config values).
+Case-insensitive substring search across indexed file contents. Returns matching lines with file, line number, and surrounding context. Use when symbol search misses (string literals, comments, config values). Set `exact: true` for case-sensitive exact matching — recommended for punctuation-heavy queries (`Foo::new(`, enum variants, macro invocations). Response includes `total_hits`; if truncated, use `offset` or `exhaustive: true`.
+
+---
+
+### Cross-Reference Tools
+
+All cross-reference tools require the xref index built during `index_folder` or `index_repo`. They support Rust and Python; repos with unsupported languages receive a coverage warning. If a short name maps to multiple in-repo declarations, results are withheld and `candidates` are returned instead.
+
+#### `find_references` — All usages of a symbol
+
+```json
+{
+  "repo": "owner/repo",
+  "symbol_name": "authenticate",
+  "production_only": false,
+  "test_only": false
+}
+```
+
+Returns all call sites, construction sites, and field accesses for the named symbol. Response includes `total_refs`, `production_refs`, `test_refs`, and a `refs` list with `file`, `line`, `caller`, `ref_type`, and `is_test`.
+
+#### `find_callers` — Call sites for a function or method
+
+```json
+{
+  "repo": "owner/repo",
+  "symbol_name": "authenticate",
+  "production_only": true
+}
+```
+
+Filters xref index to `ref_type: "call"`. Use `production_only: true` to confirm a function is actually called from production code.
+
+#### `find_constructors` — Construction sites for a struct or class
+
+```json
+{
+  "repo": "owner/repo",
+  "type_name": "SpectralAnalyzer",
+  "production_only": true
+}
+```
+
+Filters to `ref_type: "construct"` (covers `::new()` calls and struct literals in Rust; class instantiation in Python). Zero production hits with non-zero test hits indicates the type is not wired in production.
+
+#### `find_field_reads` — Read sites for a field or attribute
+
+```json
+{
+  "repo": "owner/repo",
+  "field_name": "session_id",
+  "production_only": false
+}
+```
+
+Filters to `ref_type: "field_read"`.
+
+#### `find_field_writes` — Write sites for a field or attribute
+
+```json
+{
+  "repo": "owner/repo",
+  "field_name": "session_id",
+  "production_only": false
+}
+```
+
+Filters to `ref_type: "field_write"`. Useful for auditing which code mutates a field.
 
 ---
 

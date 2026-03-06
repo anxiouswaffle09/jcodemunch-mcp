@@ -237,21 +237,26 @@ search_text:      { "repo": "owner/repo", "query": "TODO" }
 
 ---
 
-## Tools (11)
+## Tools (16)
 
-| Tool               | Purpose                     |
-| ------------------ | --------------------------- |
-| `index_repo`       | Index a GitHub repository   |
-| `index_folder`     | Index a local folder        |
-| `list_repos`       | List indexed repositories   |
-| `get_file_tree`    | Repository file structure   |
-| `get_file_outline` | Symbol hierarchy for a file |
-| `get_symbol`       | Retrieve full symbol source |
-| `get_symbols`      | Batch retrieve symbols      |
-| `search_symbols`   | Search symbols with filters |
-| `search_text`      | Full-text search            |
-| `get_repo_outline` | High-level repo overview    |
-| `invalidate_cache` | Remove cached index         |
+| Tool                 | Purpose                                               |
+| -------------------- | ----------------------------------------------------- |
+| `index_repo`         | Index a GitHub repository                             |
+| `index_folder`       | Index a local folder                                  |
+| `list_repos`         | List indexed repositories                             |
+| `get_file_tree`      | Repository file structure                             |
+| `get_file_outline`   | Symbol hierarchy for a file                           |
+| `get_symbol`         | Retrieve full symbol source                           |
+| `get_symbols`        | Batch retrieve symbols                                |
+| `search_symbols`     | Search symbols with filters; supports `exhaustive`, `offset` |
+| `search_text`        | Full-text search; supports `exhaustive`, `offset`, `exact` |
+| `get_repo_outline`   | High-level repo overview                              |
+| `invalidate_cache`   | Remove cached index                                   |
+| `find_references`    | All call/construct/field-access sites for a symbol    |
+| `find_callers`       | Call sites for a function or method                   |
+| `find_constructors`  | Construction sites for a struct or class              |
+| `find_field_reads`   | Read sites for a struct field or object attribute     |
+| `find_field_writes`  | Write sites for a struct field or object attribute    |
 
 Every tool response includes a `_meta` envelope with timing, token savings, and cost avoided:
 
@@ -271,6 +276,12 @@ Every tool response includes a `_meta` envelope with timing, token savings, and 
 
 ## Recent Updates
 
+**v0.3.0** — 5 new cross-reference tools: `find_references`, `find_callers`, `find_constructors`, `find_field_reads`, `find_field_writes`; trace call sites, construction sites, and field access across the whole repo; all support `production_only` / `test_only` filters; ambiguous multi-declaration symbols are flagged rather than silently conflated
+**v0.2.20** — AutoRefresher: local folders re-index automatically before every read tool call; registered paths now persist across server restarts; two-phase change detection (mtime+size first, SHA-256 only for suspected changes); git-accelerated detection for git repos (`git diff` + `git status` instead of full scan); per-path concurrent refresh lock prevents index corruption
+**v0.2.19** — `search_text` adds `exhaustive` mode (ignore result cap), `offset` pagination, and `exact` (case-sensitive substring match); `search_symbols` adds `exhaustive` and `offset`; both tools report `total_hits` with a truncation warning when results are cut
+**v0.2.18** — anon_id persistence fix: anonymous install ID now generates once and survives across restarts; unified security check path in `index_folder`; blob SHA used for GitHub incremental detection
+**v0.2.17** — Arrow function variable support for JS/TS (`const foo = () => {}` now indexed)
+**v0.2.16** — C++ hardening pass; configurable file count cap (`JCODEMUNCH_MAX_INDEX_FILES`)
 **v0.2.10** — Pin `mcp<1.10.0` to prevent Windows `win32api` DLL crash on startup
 **v0.2.9** — Community savings meter: anonymous token savings shared to a live global counter at j.gravelle.us (opt-out via `JCODEMUNCH_SHARE_SAVINGS=0`); updated model pricing (Opus $25/1M, GPT-5 $10/1M)
 **v0.2.8** — Estimated cost avoided added to every `_meta` response (`cost_avoided`, `total_cost_avoided`)

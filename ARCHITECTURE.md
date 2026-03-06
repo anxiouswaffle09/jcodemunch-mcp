@@ -13,7 +13,7 @@ jcodemunch-mcp/
 │
 ├── src/jcodemunch_mcp/
 │   ├── __init__.py
-│   ├── server.py                    # MCP server: 11 tool definitions + dispatch
+│   ├── server.py                    # MCP server: 16 tool definitions + dispatch + AutoRefresher
 │   ├── security.py                  # Path traversal, symlink, secret, binary detection
 │   │
 │   ├── parser/
@@ -43,7 +43,8 @@ jcodemunch-mcp/
 │       ├── search_symbols.py
 │       ├── search_text.py
 │       ├── get_repo_outline.py
-│       └── invalidate_cache.py
+│       ├── invalidate_cache.py
+│       └── find_references.py       # find_references, find_callers, find_constructors, find_field_reads, find_field_writes
 │
 ├── tests/
 │   ├── fixtures/
@@ -84,13 +85,19 @@ Symbol extraction (functions, classes, methods, constants, types)
 Post-processing (overload disambiguation, content hashing)
     │
     ▼
+Cross-reference extraction (call sites, construction sites, field reads/writes)
+    │
+    ▼
 Summarization (docstring → AI batch → signature fallback)
     │
     ▼
-Storage (JSON index + raw files, atomic writes)
+Storage (JSON index + raw files + xref index, atomic writes)
     │
     ▼
-MCP tools (discovery, search, retrieval)
+AutoRefresher (mtime/git-accelerated change detection before every read call)
+    │
+    ▼
+MCP tools (discovery, search, retrieval, cross-reference)
 ```
 
 ---
@@ -184,6 +191,35 @@ All tool responses include metadata:
 ```
 
 `tokens_saved` and `total_tokens_saved` are included on all retrieval and search tools. The running total is persisted to `~/.code-index/_savings.json` across sessions.
+
+---
+
+## AutoRefresher
+
+The `AutoRefresher` runs in the MCP server before every read tool call on a locally-indexed folder. It uses a three-layer change detection stack:
+
+1. **Git-accelerated (fastest):** If the folder is a git repo and `git` is on PATH, compare the stored HEAD with the current HEAD. Use `git diff --name-only` for committed changes and `git status --porcelain` for working-tree changes. Falls back to the next layer on any git error.
+
+2. **mtime + size (fast):** Compare stored mtime and file size for each file. Only files that differ proceed to SHA-256 comparison.
+
+3. **SHA-256 (authoritative):** Read and hash only the suspected-changed files. Re-index only files whose content hash differs.
+
+Registered paths persist in `~/.code-index/autorefresh.json` and survive server restarts. A per-path threading lock prevents concurrent refreshes from corrupting the index.
+
+---
+
+## Cross-Reference Index
+
+When a folder or repo is indexed, a separate xref index is built alongside the symbol index. Each entry records:
+
+- `callee` — the name being referenced
+- `ref_type` — `call`, `construct`, `field_read`, or `field_write`
+- `file`, `line`, `caller` — where the reference occurs
+- `is_test` — whether the reference is in test code
+
+Five tools query this index: `find_references`, `find_callers`, `find_constructors`, `find_field_reads`, `find_field_writes`. All support `production_only` and `test_only` filters. If a short name is ambiguous (multiple in-repo declarations), results are withheld and candidates are returned instead.
+
+Cross-reference extraction currently supports Rust and Python. Repos with unsupported languages receive a coverage warning in the response.
 
 ---
 

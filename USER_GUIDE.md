@@ -2,8 +2,17 @@
 
 ## Installation
 
+The recommended approach is `uvx`, which resolves and runs the package without requiring anything on your PATH:
+
 ```bash
-pip install git+https://github.com/jgravelle/jcodemunch-mcp.git
+uvx jcodemunch-mcp --help
+```
+
+Or install with pip:
+
+```bash
+pip install jcodemunch-mcp
+jcodemunch-mcp --help
 ```
 
 Or from source:
@@ -167,6 +176,59 @@ search_text: { "repo": "owner/repo", "query": "TODO", "file_pattern": "*.py" }
 
 Use `search_text` for string literals, comments, configuration values, or anything that is not a symbol name.
 
+For punctuation-heavy queries (macro invocations, `::new(` patterns, enum variants), use `exact=true` for case-sensitive exact matching:
+
+```
+search_text: { "repo": "owner/repo", "query": "Foo::new(", "exact": true }
+```
+
+If results are truncated (check `total_hits` vs `result_count` in the response), use `exhaustive=true` or paginate with `offset`:
+
+```
+search_text: { "repo": "owner/repo", "query": "TODO", "exhaustive": true }
+search_text: { "repo": "owner/repo", "query": "TODO", "max_results": 20, "offset": 20 }
+```
+
+### Trace Cross-References
+
+Find everywhere a function is called:
+
+```
+find_callers: { "repo": "owner/repo", "symbol_name": "authenticate" }
+```
+
+Find only production callers (exclude test code):
+
+```
+find_callers: { "repo": "owner/repo", "symbol_name": "authenticate", "production_only": true }
+```
+
+Verify a type is actually instantiated in production (not just in tests):
+
+```
+find_constructors: { "repo": "owner/repo", "type_name": "SpectralAnalyzer", "production_only": true }
+```
+
+Track all reads of a struct field:
+
+```
+find_field_reads: { "repo": "owner/repo", "field_name": "session_id" }
+```
+
+Find all writes to a field (useful for auditing mutation):
+
+```
+find_field_writes: { "repo": "owner/repo", "field_name": "session_id", "production_only": true }
+```
+
+Find all usages of a symbol across all reference types (calls + constructions + field accesses):
+
+```
+find_references: { "repo": "owner/repo", "symbol_name": "Config" }
+```
+
+> **Note:** Cross-reference results include `total_refs`, `production_refs`, `test_refs`, and a `refs` list with file, line, and caller information. If a symbol name is ambiguous (multiple in-repo declarations with the same short name), the tool withholds conflated results and returns `candidates` instead — inspect them with `search_symbols` or `get_symbol` first.
+
 ### Force Re-index
 
 ```
@@ -178,19 +240,24 @@ index_repo: { "url": "owner/repo" }
 
 ## Tool Reference
 
-| Tool               | Purpose                       | Key Parameters                                                     |
-| ------------------ | ----------------------------- | ------------------------------------------------------------------ |
-| `index_repo`       | Index GitHub repository       | `url`, `use_ai_summaries`                                          |
-| `index_folder`     | Index local folder            | `path`, `extra_ignore_patterns`, `follow_symlinks`                 |
-| `list_repos`       | List all indexed repositories | —                                                                  |
-| `get_file_tree`    | Browse file structure         | `repo`, `path_prefix`                                              |
-| `get_file_outline` | Symbols in a file             | `repo`, `file_path`                                                |
-| `get_symbol`       | Full source of one symbol     | `repo`, `symbol_id`, `verify`, `context_lines`                     |
-| `get_symbols`      | Batch retrieve symbols        | `repo`, `symbol_ids`                                               |
-| `search_symbols`   | Search symbols                | `repo`, `query`, `kind`, `language`, `file_pattern`, `max_results` |
-| `search_text`      | Full-text search              | `repo`, `query`, `file_pattern`, `max_results`                     |
-| `get_repo_outline` | High-level overview           | `repo`                                                             |
-| `invalidate_cache` | Delete cached index           | `repo`                                                             |
+| Tool                 | Purpose                            | Key Parameters                                                                      |
+| -------------------- | ---------------------------------- | ----------------------------------------------------------------------------------- |
+| `index_repo`         | Index GitHub repository            | `url`, `use_ai_summaries`                                                           |
+| `index_folder`       | Index local folder                 | `path`, `extra_ignore_patterns`, `follow_symlinks`                                  |
+| `list_repos`         | List all indexed repositories      | —                                                                                   |
+| `get_file_tree`      | Browse file structure              | `repo`, `path_prefix`                                                               |
+| `get_file_outline`   | Symbols in a file                  | `repo`, `file_path`                                                                 |
+| `get_symbol`         | Full source of one symbol          | `repo`, `symbol_id`, `verify`, `context_lines`                                      |
+| `get_symbols`        | Batch retrieve symbols             | `repo`, `symbol_ids`                                                                |
+| `search_symbols`     | Search symbols                     | `repo`, `query`, `kind`, `language`, `file_pattern`, `max_results`, `offset`, `exhaustive` |
+| `search_text`        | Full-text search                   | `repo`, `query`, `file_pattern`, `max_results`, `offset`, `exhaustive`, `exact`     |
+| `get_repo_outline`   | High-level overview                | `repo`                                                                              |
+| `invalidate_cache`   | Delete cached index                | `repo`                                                                              |
+| `find_references`    | All usages of a symbol             | `repo`, `symbol_name`, `production_only`, `test_only`                               |
+| `find_callers`       | Call sites for a function/method   | `repo`, `symbol_name`, `production_only`, `test_only`                               |
+| `find_constructors`  | Construction sites for a type      | `repo`, `type_name`, `production_only`, `test_only`                                 |
+| `find_field_reads`   | Read sites for a field/attribute   | `repo`, `field_name`, `production_only`                                             |
+| `find_field_writes`  | Write sites for a field/attribute  | `repo`, `field_name`, `production_only`                                             |
 
 ---
 
@@ -281,3 +348,6 @@ Indexes are stored at `~/.code-index/` (override with the `CODE_INDEX_PATH` envi
 4. Batch-retrieve related symbols with `get_symbols` instead of repeated `get_symbol` calls.
 5. Use `search_text` when symbol search does not locate the needed content.
 6. Use `verify: true` on `get_symbol` to detect source drift since indexing.
+7. Check `total_hits` in search responses — if it exceeds `result_count`, use `exhaustive: true` or paginate with `offset` before drawing conclusions.
+8. Use `find_constructors` with `production_only: true` before claiming a type is wired in production — zero production hits means it is not, regardless of whether the symbol exists in the index.
+9. Use `find_callers` / `find_field_writes` to quickly identify dead code or unintended mutation paths.
