@@ -10,7 +10,7 @@ import pathspec
 
 logger = logging.getLogger(__name__)
 
-from ..parser import parse_file, LANGUAGE_EXTENSIONS
+from ..parser import parse_file, extract_refs, LANGUAGE_EXTENSIONS
 from ..security import (
     validate_path,
     is_symlink_escape,
@@ -348,6 +348,22 @@ def index_folder(
                 languages={}, git_head=git_head,
             )
 
+            # Update cross-references for changed/new files only
+            incremental_refs: list[dict] = []
+            for rel_path in files_to_parse:
+                content = current_files[rel_path]
+                ext = os.path.splitext(rel_path)[1]
+                language = LANGUAGE_EXTENSIONS.get(ext)
+                if not language:
+                    continue
+                try:
+                    file_symbols = [s for s in new_symbols if s.file == rel_path]
+                    incremental_refs.extend(extract_refs(content, rel_path, language, file_symbols))
+                except Exception:
+                    pass
+            removed = set(changed) | set(deleted)
+            store.merge_refs(owner, repo_name, incremental_refs, removed)
+
             result = {
                 "success": True,
                 "repo": f"{owner}/{repo_name}",
@@ -421,6 +437,20 @@ def index_folder(
             file_hashes=file_hashes,
         )
 
+        # Extract and save cross-references
+        all_refs = []
+        for rel_path, content in raw_files.items():
+            ext = os.path.splitext(rel_path)[1]
+            language = LANGUAGE_EXTENSIONS.get(ext)
+            if not language:
+                continue
+            try:
+                file_symbols = [s for s in all_symbols if s.file == rel_path]
+                all_refs.extend(extract_refs(content, rel_path, language, file_symbols))
+            except Exception:
+                pass
+        store.save_refs(owner, repo_name, all_refs)
+
         result = {
             "success": True,
             "repo": f"{owner}/{repo_name}",
@@ -428,6 +458,7 @@ def index_folder(
             "indexed_at": store.load_index(owner, repo_name).indexed_at,
             "file_count": len(parsed_files),
             "symbol_count": len(all_symbols),
+            "ref_count": len(all_refs),
             "languages": languages,
             "files": parsed_files[:20],  # Limit files in response
             "discovery_skip_counts": skip_counts,

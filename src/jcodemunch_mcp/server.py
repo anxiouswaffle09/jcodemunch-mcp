@@ -23,6 +23,13 @@ from .tools.search_symbols import search_symbols
 from .tools.invalidate_cache import invalidate_cache
 from .tools.search_text import search_text
 from .tools.get_repo_outline import get_repo_outline
+from .tools.find_references import (
+    find_references,
+    find_callers,
+    find_constructors,
+    find_field_reads,
+    find_field_writes,
+)
 
 
 _INDEX_TOOLS = {"index_folder", "index_repo", "invalidate_cache"}
@@ -257,7 +264,7 @@ async def list_tools() -> list[Tool]:
         ),
         Tool(
             name="search_symbols",
-            description="Search for symbols matching a query across the entire indexed repository. Returns matches with signatures and summaries.",
+            description="Search for symbols matching a query across the entire indexed repository. Returns matches with signatures and summaries. Check 'total_hits' in the response — if it exceeds result_count, use offset/exhaustive to get more.",
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -285,8 +292,18 @@ async def list_tools() -> list[Tool]:
                     },
                     "max_results": {
                         "type": "integer",
-                        "description": "Maximum number of results to return",
+                        "description": "Maximum number of results to return (default 10, max 200)",
                         "default": 10
+                    },
+                    "offset": {
+                        "type": "integer",
+                        "description": "Skip this many results before returning — use for pagination",
+                        "default": 0
+                    },
+                    "exhaustive": {
+                        "type": "boolean",
+                        "description": "Return all results ignoring max_results cap. Use for wiring audits and dead-code checks.",
+                        "default": False
                     }
                 },
                 "required": ["repo", "query"]
@@ -308,7 +325,7 @@ async def list_tools() -> list[Tool]:
         ),
         Tool(
             name="search_text",
-            description="Full-text search across indexed file contents. Useful when symbol search misses (e.g., string literals, comments, config values).",
+            description="Full-text search across indexed file contents. Useful when symbol search misses (e.g., string literals, comments, config values). Use exact=true for punctuation-heavy queries like Foo::new(, enum variants, macro invocations. Check 'total_hits' — if it exceeds result_count, use offset/exhaustive to get more.",
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -318,7 +335,7 @@ async def list_tools() -> list[Tool]:
                     },
                     "query": {
                         "type": "string",
-                        "description": "Text to search for (case-insensitive substring match)"
+                        "description": "Text to search for"
                     },
                     "file_pattern": {
                         "type": "string",
@@ -326,8 +343,23 @@ async def list_tools() -> list[Tool]:
                     },
                     "max_results": {
                         "type": "integer",
-                        "description": "Maximum number of matching lines to return",
+                        "description": "Maximum number of matching lines to return (default 20, max 500)",
                         "default": 20
+                    },
+                    "offset": {
+                        "type": "integer",
+                        "description": "Skip this many results before returning — use for pagination",
+                        "default": 0
+                    },
+                    "exhaustive": {
+                        "type": "boolean",
+                        "description": "Return all results ignoring max_results cap.",
+                        "default": False
+                    },
+                    "exact": {
+                        "type": "boolean",
+                        "description": "Case-sensitive exact substring match. Use for punctuation-heavy queries like `Foo::new(`, enum variants, macro invocations, exact log strings. Default is case-insensitive.",
+                        "default": False
                     }
                 },
                 "required": ["repo", "query"]
@@ -345,6 +377,74 @@ async def list_tools() -> list[Tool]:
                     }
                 },
                 "required": ["repo"]
+            }
+        ),
+        Tool(
+            name="find_references",
+            description="Find all references to a symbol (calls, struct constructions, field accesses). Returns production_refs and test_refs counts separately. Warns if a symbol is only referenced from tests.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "repo": {"type": "string", "description": "Repository identifier"},
+                    "symbol_name": {"type": "string", "description": "Symbol name to look up (case-sensitive)"},
+                    "production_only": {"type": "boolean", "description": "Exclude test-context references", "default": False},
+                    "test_only": {"type": "boolean", "description": "Return only test-context references", "default": False}
+                },
+                "required": ["repo", "symbol_name"]
+            }
+        ),
+        Tool(
+            name="find_callers",
+            description="Find all call sites for a function or method. Use to verify a function is actually called in production code.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "repo": {"type": "string", "description": "Repository identifier"},
+                    "symbol_name": {"type": "string", "description": "Function or method name (case-sensitive)"},
+                    "production_only": {"type": "boolean", "description": "Exclude test-context callers", "default": False},
+                    "test_only": {"type": "boolean", "description": "Return only test-context callers", "default": False}
+                },
+                "required": ["repo", "symbol_name"]
+            }
+        ),
+        Tool(
+            name="find_constructors",
+            description="Find all construction sites for a struct or class (::new calls and struct literals). Use to verify a type is actually instantiated in production — the SpectralAnalyzer check.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "repo": {"type": "string", "description": "Repository identifier"},
+                    "type_name": {"type": "string", "description": "Struct or class name (case-sensitive, e.g. 'SpectralAnalyzer')"},
+                    "production_only": {"type": "boolean", "description": "Exclude test-context constructions", "default": False},
+                    "test_only": {"type": "boolean", "description": "Return only test-context constructions", "default": False}
+                },
+                "required": ["repo", "type_name"]
+            }
+        ),
+        Tool(
+            name="find_field_reads",
+            description="Find all read sites for a struct field or object attribute.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "repo": {"type": "string", "description": "Repository identifier"},
+                    "field_name": {"type": "string", "description": "Field or attribute name (case-sensitive)"},
+                    "production_only": {"type": "boolean", "description": "Exclude test-context reads", "default": False}
+                },
+                "required": ["repo", "field_name"]
+            }
+        ),
+        Tool(
+            name="find_field_writes",
+            description="Find all write sites for a struct field or object attribute.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "repo": {"type": "string", "description": "Repository identifier"},
+                    "field_name": {"type": "string", "description": "Field or attribute name (case-sensitive)"},
+                    "production_only": {"type": "boolean", "description": "Exclude test-context writes", "default": False}
+                },
+                "required": ["repo", "field_name"]
             }
         ),
     ]
@@ -415,6 +515,8 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
                 file_pattern=arguments.get("file_pattern"),
                 language=arguments.get("language"),
                 max_results=arguments.get("max_results", 10),
+                offset=arguments.get("offset", 0),
+                exhaustive=arguments.get("exhaustive", False),
                 storage_path=storage_path
             )
         elif name == "invalidate_cache":
@@ -428,12 +530,53 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
                 query=arguments["query"],
                 file_pattern=arguments.get("file_pattern"),
                 max_results=arguments.get("max_results", 20),
+                offset=arguments.get("offset", 0),
+                exhaustive=arguments.get("exhaustive", False),
+                exact=arguments.get("exact", False),
                 storage_path=storage_path
             )
         elif name == "get_repo_outline":
             result = get_repo_outline(
                 repo=arguments["repo"],
                 storage_path=storage_path
+            )
+        elif name == "find_references":
+            result = find_references(
+                repo=arguments["repo"],
+                symbol_name=arguments["symbol_name"],
+                production_only=arguments.get("production_only", False),
+                test_only=arguments.get("test_only", False),
+                storage_path=storage_path,
+            )
+        elif name == "find_callers":
+            result = find_callers(
+                repo=arguments["repo"],
+                symbol_name=arguments["symbol_name"],
+                production_only=arguments.get("production_only", False),
+                test_only=arguments.get("test_only", False),
+                storage_path=storage_path,
+            )
+        elif name == "find_constructors":
+            result = find_constructors(
+                repo=arguments["repo"],
+                type_name=arguments["type_name"],
+                production_only=arguments.get("production_only", False),
+                test_only=arguments.get("test_only", False),
+                storage_path=storage_path,
+            )
+        elif name == "find_field_reads":
+            result = find_field_reads(
+                repo=arguments["repo"],
+                field_name=arguments["field_name"],
+                production_only=arguments.get("production_only", False),
+                storage_path=storage_path,
+            )
+        elif name == "find_field_writes":
+            result = find_field_writes(
+                repo=arguments["repo"],
+                field_name=arguments["field_name"],
+                production_only=arguments.get("production_only", False),
+                storage_path=storage_path,
             )
         else:
             result = {"error": f"Unknown tool: {name}"}

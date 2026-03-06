@@ -1,5 +1,6 @@
 """Generic AST symbol extractor using tree-sitter."""
 
+import bisect
 from typing import Optional
 from tree_sitter_language_pack import get_parser
 
@@ -838,3 +839,260 @@ def _disambiguate_overloads(symbols: list[Symbol]) -> list[Symbol]:
             sym.id = f"{sym.id}~{ordinals[sym.id]}"
         result.append(sym)
     return result
+
+
+# ---------------------------------------------------------------------------
+# Cross-reference extraction
+# ---------------------------------------------------------------------------
+
+def extract_refs(content: str, filename: str, language: str, symbols: list[Symbol]) -> list[dict]:
+    """Extract cross-references (call sites, struct constructions, field accesses).
+
+    Performs a second tree-sitter pass over the file body after symbols are known.
+    Returns a list of reference dicts:
+        {
+            "callee":          str,   # name being referenced
+            "ref_type":        str,   # "call" | "construct" | "field_read" | "field_write"
+            "caller_file":     str,
+            "caller_line":     int,
+            "caller_symbol_id": str | None,
+            "is_test":         bool,
+        }
+    """
+    if language not in LANGUAGE_REGISTRY:
+        return []
+
+    spec = LANGUAGE_REGISTRY[language]
+    source_bytes = content.encode("utf-8")
+
+    try:
+        parser = get_parser(spec.ts_language)
+        tree = parser.parse(source_bytes)
+    except Exception:
+        return []
+
+    # Build a sorted interval list for O(log n) caller lookup: (start_line, end_line, symbol_id)
+    intervals: list[tuple[int, int, str]] = sorted(
+        [(s.line, s.end_line, s.id) for s in symbols if s.file == filename],
+        key=lambda x: x[0],
+    )
+    start_lines = [iv[0] for iv in intervals]
+
+    def _find_caller(line: int) -> Optional[str]:
+        """Return the symbol ID that contains this line, or None."""
+        idx = bisect.bisect_right(start_lines, line) - 1
+        while idx >= 0:
+            sl, el, sid = intervals[idx]
+            if sl <= line <= el:
+                return sid
+            idx -= 1
+        return None
+
+    refs: list[dict] = []
+
+    # Detect test context (language-specific heuristics)
+    is_test_file = (
+        "test" in filename.lower()
+        or filename.endswith("_test.rs")
+        or "/tests/" in filename
+        or "\\tests\\" in filename
+    )
+
+    _collect_refs(tree.root_node, source_bytes, filename, language, _find_caller, refs, is_test_file, False)
+    return refs
+
+
+def _collect_refs(
+    node,
+    source_bytes: bytes,
+    filename: str,
+    language: str,
+    find_caller,
+    refs: list,
+    is_test_file: bool,
+    in_test_context: bool,
+):
+    """Recursively walk AST collecting cross-references."""
+    node_type = node.type
+
+    # --- Test-context detection ---
+    local_in_test = in_test_context
+
+    if language == "rust":
+        # mod item with #[cfg(test)] attribute
+        if node_type == "mod_item":
+            if _rust_has_attr(node, source_bytes, "cfg(test)") or _rust_has_attr(node, source_bytes, "test"):
+                local_in_test = True
+        # function with #[test] attribute
+        elif node_type == "function_item":
+            if _rust_has_attr(node, source_bytes, "test"):
+                local_in_test = True
+
+    elif language == "python":
+        # class/function named test_* or inside a tests module
+        if node_type in ("function_definition", "class_definition"):
+            name_node = node.child_by_field_name("name")
+            if name_node:
+                name = source_bytes[name_node.start_byte:name_node.end_byte].decode("utf-8")
+                if name.startswith("test_") or name.startswith("Test"):
+                    local_in_test = True
+
+    is_test = is_test_file or local_in_test
+
+    line = node.start_point[0] + 1
+
+    # --- Reference collection ---
+
+    if language == "rust":
+        # Direct function / associated function call: foo(), Foo::bar(), Foo::new()
+        if node_type == "call_expression":
+            func_node = node.child_by_field_name("function")
+            if func_node is not None:
+                callee = _extract_callee_name(func_node, source_bytes)
+                if callee:
+                    ref_type = "construct" if callee.endswith("::new") or callee == "new" else "call"
+                    # Normalise Foo::new → Foo
+                    callee_name = callee[:-5] if callee.endswith("::new") else callee
+                    refs.append({
+                        "callee": callee_name,
+                        "ref_type": ref_type,
+                        "caller_file": filename,
+                        "caller_line": line,
+                        "caller_symbol_id": find_caller(line),
+                        "is_test": is_test,
+                    })
+
+        # Method call: receiver.method(...)
+        elif node_type == "method_call_expression":
+            method_node = node.child_by_field_name("name")
+            if method_node:
+                callee = source_bytes[method_node.start_byte:method_node.end_byte].decode("utf-8")
+                refs.append({
+                    "callee": callee,
+                    "ref_type": "call",
+                    "caller_file": filename,
+                    "caller_line": line,
+                    "caller_symbol_id": find_caller(line),
+                    "is_test": is_test,
+                })
+
+        # Struct literal: Foo { field: val }
+        elif node_type == "struct_expression":
+            name_node = node.child_by_field_name("name")
+            if name_node:
+                callee = source_bytes[name_node.start_byte:name_node.end_byte].decode("utf-8")
+                # strip path prefix (e.g. module::Foo → Foo)
+                callee = callee.split("::")[-1]
+                refs.append({
+                    "callee": callee,
+                    "ref_type": "construct",
+                    "caller_file": filename,
+                    "caller_line": line,
+                    "caller_symbol_id": find_caller(line),
+                    "is_test": is_test,
+                })
+
+        # Field access: expr.field  (read vs write determined by parent)
+        elif node_type == "field_expression":
+            field_node = node.child_by_field_name("field")
+            if field_node:
+                field_name = source_bytes[field_node.start_byte:field_node.end_byte].decode("utf-8")
+                # Determine if this is a write (LHS of assignment)
+                ref_type = "field_write" if _is_assignment_lhs(node) else "field_read"
+                refs.append({
+                    "callee": field_name,
+                    "ref_type": ref_type,
+                    "caller_file": filename,
+                    "caller_line": line,
+                    "caller_symbol_id": find_caller(line),
+                    "is_test": is_test,
+                })
+
+    elif language == "python":
+        # Function call: foo(), obj.method()
+        if node_type == "call":
+            func_node = node.child_by_field_name("function")
+            if func_node is not None:
+                callee = _extract_callee_name(func_node, source_bytes)
+                if callee:
+                    refs.append({
+                        "callee": callee,
+                        "ref_type": "call",
+                        "caller_file": filename,
+                        "caller_line": line,
+                        "caller_symbol_id": find_caller(line),
+                        "is_test": is_test,
+                    })
+
+        # Attribute access: obj.attr (read)
+        elif node_type == "attribute":
+            attr_node = node.child_by_field_name("attribute")
+            if attr_node:
+                attr_name = source_bytes[attr_node.start_byte:attr_node.end_byte].decode("utf-8")
+                ref_type = "field_write" if _is_assignment_lhs(node) else "field_read"
+                refs.append({
+                    "callee": attr_name,
+                    "ref_type": ref_type,
+                    "caller_file": filename,
+                    "caller_line": line,
+                    "caller_symbol_id": find_caller(line),
+                    "is_test": is_test,
+                })
+
+    # Recurse
+    for child in node.children:
+        _collect_refs(child, source_bytes, filename, language, find_caller, refs, is_test_file, local_in_test)
+
+
+def _extract_callee_name(node, source_bytes: bytes) -> Optional[str]:
+    """Extract a readable callee name from a function/call node."""
+    node_type = node.type
+
+    # Simple identifier: foo
+    if node_type in ("identifier", "type_identifier"):
+        return source_bytes[node.start_byte:node.end_byte].decode("utf-8")
+
+    # Scoped call: Foo::bar or Foo::new
+    if node_type in ("scoped_identifier", "qualified_identifier"):
+        text = source_bytes[node.start_byte:node.end_byte].decode("utf-8")
+        # Return last two segments for readability: module::Foo::new → Foo::new
+        parts = text.split("::")
+        return "::".join(parts[-2:]) if len(parts) >= 2 else text
+
+    # Python attribute access: obj.method → method name
+    if node_type == "attribute":
+        attr = node.child_by_field_name("attribute")
+        if attr:
+            return source_bytes[attr.start_byte:attr.end_byte].decode("utf-8")
+
+    # Field expression (Rust): obj.method → method
+    if node_type == "field_expression":
+        field = node.child_by_field_name("field")
+        if field:
+            return source_bytes[field.start_byte:field.end_byte].decode("utf-8")
+
+    return None
+
+
+def _is_assignment_lhs(node) -> bool:
+    """Return True if this node is the left-hand side of an assignment."""
+    parent = node.parent
+    if parent is None:
+        return False
+    # Rust: assignment_expression, compound_assignment_expression
+    # Python: assignment
+    if parent.type in ("assignment_expression", "compound_assignment_expression", "assignment"):
+        lhs = parent.child_by_field_name("left")
+        if lhs is not None and lhs == node:
+            return True
+    return False
+
+
+def _rust_has_attr(node, source_bytes: bytes, attr_text: str) -> bool:
+    """Return True if a Rust node has an attribute containing attr_text."""
+    for child in node.children:
+        if child.type == "attribute_item":
+            text = source_bytes[child.start_byte:child.end_byte].decode("utf-8")
+            if attr_text in text:
+                return True
+    return False

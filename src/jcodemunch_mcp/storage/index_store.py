@@ -489,6 +489,7 @@ class IndexStore:
     def delete_index(self, owner: str, name: str) -> bool:
         """Delete an index and its raw files."""
         index_path = self._index_path(owner, name)
+        refs_path = self._refs_path(owner, name)
         content_dir = self._content_dir(owner, name)
 
         deleted = False
@@ -497,11 +498,50 @@ class IndexStore:
             index_path.unlink()
             deleted = True
 
+        if refs_path.exists():
+            refs_path.unlink()
+            deleted = True
+
         if content_dir.exists():
             shutil.rmtree(content_dir)
             deleted = True
 
         return deleted
+
+    # ------------------------------------------------------------------
+    # Cross-reference storage (refs.json — separate from main index)
+    # ------------------------------------------------------------------
+
+    def _refs_path(self, owner: str, name: str) -> Path:
+        """Path to refs JSON file."""
+        return self.base_path / f"{self._repo_slug(owner, name)}-refs.json"
+
+    def save_refs(self, owner: str, name: str, refs: list[dict]) -> None:
+        """Save cross-reference table atomically."""
+        refs_path = self._refs_path(owner, name)
+        tmp_path = refs_path.with_suffix(".json.tmp")
+        payload = {"repo": f"{owner}/{name}", "ref_count": len(refs), "refs": refs}
+        with open(tmp_path, "w", encoding="utf-8") as f:
+            json.dump(payload, f)
+        tmp_path.replace(refs_path)
+
+    def load_refs(self, owner: str, name: str) -> Optional[list[dict]]:
+        """Load cross-reference table, or None if not yet built."""
+        refs_path = self._refs_path(owner, name)
+        if not refs_path.exists():
+            return None
+        try:
+            with open(refs_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            return data.get("refs", [])
+        except Exception:
+            return None
+
+    def merge_refs(self, owner: str, name: str, new_refs: list[dict], removed_files: set[str]) -> None:
+        """Merge new refs into existing table, removing stale entries for changed/deleted files."""
+        existing = self.load_refs(owner, name) or []
+        kept = [r for r in existing if r.get("caller_file") not in removed_files]
+        self.save_refs(owner, name, kept + new_refs)
 
     def _symbol_to_dict(self, symbol: Symbol) -> dict:
         """Convert Symbol to dict (without source content)."""
