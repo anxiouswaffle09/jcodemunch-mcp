@@ -5,7 +5,7 @@ import time
 from typing import Optional
 
 from ..storage import IndexStore, record_savings, estimate_savings, cost_avoided
-from ..parser import build_symbol_tree
+from ..parser import build_symbol_tree_from_dicts
 from ._utils import resolve_repo
 
 
@@ -49,13 +49,9 @@ def get_file_outline(
             "symbols": []
         }
     
-    # Build symbol tree
-    from ..parser import Symbol
-    symbol_objects = [_dict_to_symbol(s) for s in file_symbols]
-    tree = build_symbol_tree(symbol_objects)
-    
-    # Convert to output format
-    symbols_output = [_node_to_dict(n) for n in tree]
+    # Build symbol tree directly from dicts (no roundtrip through Symbol dataclass)
+    tree_nodes = build_symbol_tree_from_dicts(file_symbols)
+    symbols_output = [_dict_node_to_output(n) for n in tree_nodes]
     
     # Get language
     language = file_symbols[0].get("language", "")
@@ -88,42 +84,17 @@ def get_file_outline(
     }
 
 
-def _dict_to_symbol(d: dict) -> "Symbol":
-    """Convert dict back to Symbol dataclass."""
-    from ..parser import Symbol
-    return Symbol(
-        id=d["id"],
-        file=d["file"],
-        name=d["name"],
-        qualified_name=d["qualified_name"],
-        kind=d["kind"],
-        language=d["language"],
-        signature=d["signature"],
-        docstring=d.get("docstring", ""),
-        summary=d.get("summary", ""),
-        decorators=d.get("decorators", []),
-        keywords=d.get("keywords", []),
-        parent=d.get("parent"),
-        line=d["line"],
-        end_line=d["end_line"],
-        byte_offset=d["byte_offset"],
-        byte_length=d["byte_length"],
-        content_hash=d.get("content_hash", ""),
-    )
-
-
-def _node_to_dict(node) -> dict:
-    """Convert SymbolNode to output dict."""
+def _dict_node_to_output(node: dict) -> dict:
+    """Convert a build_symbol_tree_from_dicts node to output format."""
     result = {
-        "id": node.symbol.id,
-        "kind": node.symbol.kind,
-        "name": node.symbol.name,
-        "signature": node.symbol.signature,
-        "summary": node.symbol.summary,
-        "line": node.symbol.line,
+        "id": node["id"],
+        "kind": node["kind"],
+        "name": node["name"],
+        "signature": node["signature"],
+        "summary": node.get("summary", ""),
+        "line": node["line"],
     }
-    
-    if node.children:
-        result["children"] = [_node_to_dict(c) for c in node.children]
-    
+    children = node.get("_children", [])
+    if children:
+        result["children"] = [_dict_node_to_output(c) for c in children]
     return result

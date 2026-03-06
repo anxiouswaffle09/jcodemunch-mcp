@@ -3,6 +3,7 @@
 from typing import Optional
 
 from ..storage import IndexStore
+from ._utils import invalidate_repo_name_cache
 
 
 def invalidate_cache(
@@ -34,6 +35,7 @@ def invalidate_cache(
 
     store = IndexStore(base_path=storage_path)
     deleted = store.delete_index(owner, name)
+    invalidate_repo_name_cache()
 
     if deleted:
         return {

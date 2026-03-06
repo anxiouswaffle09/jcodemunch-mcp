@@ -3,6 +3,7 @@
 import hashlib
 import logging
 import os
+import sys
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Optional
@@ -23,6 +24,7 @@ from ..security import (
 )
 from ..storage import IndexStore
 from ..summarizer import summarize_symbols
+from ._utils import invalidate_repo_name_cache
 
 
 # File patterns to skip (sync with index_repo.py)
@@ -111,85 +113,101 @@ def discover_local_files(
         except Exception:
             pass
 
-    for file_path in folder_path.rglob("*"):
-        # Skip directories
-        if not file_path.is_file():
-            continue
-
-        # Symlink protection
-        if not follow_symlinks and file_path.is_symlink():
-            skip_counts["symlink"] += 1
-            logger.debug("SKIP symlink: %s", file_path)
-            continue
-        if file_path.is_symlink() and is_symlink_escape(root, file_path):
-            skip_counts["symlink_escape"] += 1
-            warnings.append(f"Skipped symlink escape: {file_path}")
-            continue
-
-        # Path traversal check
-        if not validate_path(root, file_path):
-            skip_counts["path_traversal"] += 1
-            warnings.append(f"Skipped path traversal: {file_path}")
-            continue
-
-        # Get relative path for pattern matching
+    for dirpath, dirnames, filenames in os.walk(str(root), followlinks=follow_symlinks):
+        dir_path = Path(dirpath)
         try:
-            rel_path = file_path.relative_to(root).as_posix()
+            dir_rel = dir_path.relative_to(root).as_posix()
         except ValueError:
-            skip_counts["path_traversal"] += 1
-            logger.debug("SKIP relative_to_failed: %s", file_path)
+            dirnames.clear()
             continue
 
-        # Skip patterns
-        if should_skip_file(rel_path):
-            skip_counts["skip_pattern"] += 1
-            logger.debug("SKIP skip_pattern: %s", rel_path)
-            continue
+        # Prune directories in-place so os.walk won't descend into them
+        dirnames[:] = [
+            d for d in dirnames
+            if not should_skip_file((f"{dir_rel}/{d}/" if dir_rel != "." else f"{d}/").lstrip("./"))
+            and not (gitignore_spec and gitignore_spec.match_file(
+                f"{dir_rel}/{d}/" if dir_rel != "." else f"{d}/"))
+            and not (extra_spec and extra_spec.match_file(
+                f"{dir_rel}/{d}/" if dir_rel != "." else f"{d}/"))
+        ]
 
-        # .gitignore matching
-        if gitignore_spec and gitignore_spec.match_file(rel_path):
-            skip_counts["gitignore"] += 1
-            logger.debug("SKIP gitignore: %s", rel_path)
-            continue
+        for filename in filenames:
+            file_path = dir_path / filename
 
-        # Extra ignore patterns
-        if extra_spec and extra_spec.match_file(rel_path):
-            skip_counts["extra_ignore"] += 1
-            logger.debug("SKIP extra_ignore: %s", rel_path)
-            continue
-
-        # Secret detection
-        if is_secret_file(rel_path):
-            skip_counts["secret"] += 1
-            warnings.append(f"Skipped secret file: {rel_path}")
-            continue
-
-        # Extension filter
-        ext = file_path.suffix
-        if ext not in LANGUAGE_EXTENSIONS:
-            skip_counts["wrong_extension"] += 1
-            logger.debug("SKIP wrong_extension: %s", rel_path)
-            continue
-
-        # Size limit
-        try:
-            if file_path.stat().st_size > max_size:
-                skip_counts["too_large"] += 1
-                logger.debug("SKIP too_large: %s", rel_path)
+            # Symlink protection
+            if not follow_symlinks and file_path.is_symlink():
+                skip_counts["symlink"] += 1
+                logger.debug("SKIP symlink: %s", file_path)
                 continue
-        except OSError:
-            skip_counts["unreadable"] += 1
-            logger.debug("SKIP unreadable (stat failed): %s", rel_path)
-            continue
+            if file_path.is_symlink() and is_symlink_escape(root, file_path):
+                skip_counts["symlink_escape"] += 1
+                warnings.append(f"Skipped symlink escape: {file_path}")
+                continue
 
-        # Binary detection (content sniff for files with source extensions)
-        if is_binary_file(file_path):
-            skip_counts["binary"] += 1
-            warnings.append(f"Skipped binary file: {rel_path}")
-            continue
+            # Path traversal check
+            if not validate_path(root, file_path):
+                skip_counts["path_traversal"] += 1
+                warnings.append(f"Skipped path traversal: {file_path}")
+                continue
 
-        logger.debug("ACCEPT: %s", rel_path)
-        files.append(file_path)
+            # Get relative path for pattern matching
+            try:
+                rel_path = file_path.relative_to(root).as_posix()
+            except ValueError:
+                skip_counts["path_traversal"] += 1
+                logger.debug("SKIP relative_to_failed: %s", file_path)
+                continue
+
+            # Skip patterns (file-level check)
+            if should_skip_file(rel_path):
+                skip_counts["skip_pattern"] += 1
+                logger.debug("SKIP skip_pattern: %s", rel_path)
+                continue
+
+            # .gitignore matching
+            if gitignore_spec and gitignore_spec.match_file(rel_path):
+                skip_counts["gitignore"] += 1
+                logger.debug("SKIP gitignore: %s", rel_path)
+                continue
+
+            # Extra ignore patterns
+            if extra_spec and extra_spec.match_file(rel_path):
+                skip_counts["extra_ignore"] += 1
+                logger.debug("SKIP extra_ignore: %s", rel_path)
+                continue
+
+            # Secret detection
+            if is_secret_file(rel_path):
+                skip_counts["secret"] += 1
+                warnings.append(f"Skipped secret file: {rel_path}")
+                continue
+
+            # Extension filter
+            ext = file_path.suffix
+            if ext not in LANGUAGE_EXTENSIONS:
+                skip_counts["wrong_extension"] += 1
+                logger.debug("SKIP wrong_extension: %s", rel_path)
+                continue
+
+            # Size limit
+            try:
+                if file_path.stat().st_size > max_size:
+                    skip_counts["too_large"] += 1
+                    logger.debug("SKIP too_large: %s", rel_path)
+                    continue
+            except OSError:
+                skip_counts["unreadable"] += 1
+                logger.debug("SKIP unreadable (stat failed): %s", rel_path)
+                continue
+
+            # Binary detection (content sniff for files with source extensions)
+            if is_binary_file(file_path):
+                skip_counts["binary"] += 1
+                warnings.append(f"Skipped binary file: {rel_path}")
+                continue
+
+            logger.debug("ACCEPT: %s", rel_path)
+            files.append(file_path)
 
     logger.info(
         "Discovery complete — accepted: %d, skipped by reason: %s",
@@ -295,7 +313,9 @@ def index_folder(
 
         # Incremental path: detect changes and only re-parse affected files
         if incremental and store.load_index(owner, repo_name) is not None:
-            changed, new, deleted = store.detect_changes(owner, repo_name, current_files)
+            changed, new, deleted = store.detect_changes_fast(
+                owner, repo_name, folder_path, source_files, source_path=folder_path
+            )
 
             if not changed and not new and not deleted:
                 return {
@@ -348,6 +368,7 @@ def index_folder(
                 changed_files=changed, new_files=new, deleted_files=deleted,
                 new_symbols=new_symbols, raw_files=raw_files_subset,
                 languages={}, git_head=git_head,
+                folder_path=folder_path,
             )
 
             if needs_full_backfill:
@@ -443,13 +464,9 @@ def index_folder(
         # Generate summaries
         all_symbols = summarize_symbols(all_symbols, use_ai=use_ai_summaries)
 
-        # Save index
-        # Track hashes for all discovered source files so incremental change detection
-        # does not repeatedly report no-symbol files as "new".
-        file_hashes = {
-            fp: hashlib.sha256(content.encode("utf-8")).hexdigest()
-            for fp, content in current_files.items()
-        }
+        # Save index — let save_index build mtime+size metadata from disk
+        from ..storage.index_store import _get_git_head as _ggh
+        git_head_full = _ggh(folder_path) or ""
         store.save_index(
             owner=owner,
             name=repo_name,
@@ -457,8 +474,11 @@ def index_folder(
             symbols=all_symbols,
             raw_files=raw_files,
             languages=languages,
-            file_hashes=file_hashes,
+            folder_path=folder_path,
+            git_head=git_head_full,
         )
+
+        invalidate_repo_name_cache()
 
         # Extract and save cross-references
         all_refs = []

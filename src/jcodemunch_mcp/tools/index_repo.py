@@ -3,9 +3,9 @@
 import asyncio
 import hashlib
 import os
-from types import SimpleNamespace
 from typing import Optional
-from urllib.parse import urlparse
+from types import SimpleNamespace
+from urllib.parse import quote, urlparse
 
 import httpx
 
@@ -178,17 +178,22 @@ async def fetch_file_content(
     owner: str,
     repo: str,
     path: str,
-    token: Optional[str] = None
+    token: Optional[str] = None,
+    ref: str = "HEAD",
 ) -> str:
-    """Fetch raw file content from GitHub."""
-    url = f"https://api.github.com/repos/{owner}/{repo}/contents/{path}"
-    headers = {"Accept": "application/vnd.github.v3.raw"}
-    
+    """Fetch raw file content from raw.githubusercontent.com.
+
+    Uses raw download endpoint which has higher rate limits than the Contents API
+    and doesn't count against the 60 req/hr unauthenticated API quota.
+    """
+    encoded_path = "/".join(quote(part, safe="") for part in path.split("/"))
+    url = f"https://raw.githubusercontent.com/{owner}/{repo}/{ref}/{encoded_path}"
+    headers: dict[str, str] = {}
     if token:
         headers["Authorization"] = f"token {token}"
-    
+
     async with httpx.AsyncClient() as client:
-        response = await client.get(url, headers=headers)
+        response = await client.get(url, headers=headers, follow_redirects=True)
         response.raise_for_status()
         return response.text
 
@@ -263,22 +268,35 @@ async def index_repo(
         # Fetch all file contents concurrently
         semaphore = asyncio.Semaphore(10)  # Limit concurrent requests
 
-        async def fetch_with_limit(path: str) -> tuple[str, str]:
+        fetch_warnings: list[str] = []
+
+        async def fetch_with_limit(path: str) -> tuple[str, Optional[str]]:
             async with semaphore:
-                try:
-                    content = await fetch_file_content(owner, repo, path, github_token)
-                    return path, content
-                except Exception:
-                    return path, ""
+                for attempt in range(3):
+                    try:
+                        content = await fetch_file_content(owner, repo, path, github_token)
+                        return path, content
+                    except httpx.HTTPStatusError as e:
+                        if e.response.status_code == 404:
+                            return path, None  # Genuinely missing
+                        if e.response.status_code in (403, 429):
+                            await asyncio.sleep(2 ** attempt * 2)
+                        else:
+                            await asyncio.sleep(2 ** attempt)
+                    except Exception:
+                        await asyncio.sleep(2 ** attempt)
+                fetch_warnings.append(f"Failed to fetch {path} after 3 attempts")
+                return path, None
 
         tasks = [fetch_with_limit(path) for path in source_files]
         file_contents = await asyncio.gather(*tasks)
 
-        # Build current_files map from fetched content
+        # Build current_files map from fetched content (None = failed, "" = empty file)
         current_files: dict[str, str] = {}
         for path, content in file_contents:
-            if content:
+            if content is not None:
                 current_files[path] = content
+        warnings.extend(fetch_warnings)
 
         store = IndexStore(base_path=storage_path)
 

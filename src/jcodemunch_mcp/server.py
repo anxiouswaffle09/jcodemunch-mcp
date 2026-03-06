@@ -32,9 +32,31 @@ from .tools.find_references import (
 )
 
 
-_INDEX_TOOLS = {"index_folder", "index_repo", "invalidate_cache"}
+# Tools that need an up-to-date index before running.
+# Allowlist prevents new tools from silently skipping refresh.
+_REFRESH_TOOLS = {
+    "get_file_tree", "get_file_outline", "get_symbol", "get_symbols",
+    "search_symbols", "search_text", "get_repo_outline",
+    "find_references", "find_callers", "find_constructors",
+    "find_field_reads", "find_field_writes",
+}
 
 _log = logging.getLogger("jcodemunch")
+
+MAX_WATCHED_PATHS = 20
+
+# Per-path locks to prevent concurrent refreshes of the same path.
+_refresh_locks: dict[str, threading.Lock] = {}
+_refresh_locks_mutex = threading.Lock()
+
+
+def _get_path_lock(path: str) -> threading.Lock:
+    with _refresh_locks_mutex:
+        if len(_refresh_locks) > 50:
+            _log.warning("autorefresh: path lock table > 50 entries")
+        if path not in _refresh_locks:
+            _refresh_locks[path] = threading.Lock()
+        return _refresh_locks[path]
 
 
 class AutoRefresher:
@@ -47,6 +69,7 @@ class AutoRefresher:
         self._last_refresh: dict[str, float] = {}
         self._paths: set[str] = set()
         self._cooldown: float = 0.0
+        self._cfg_mtime: Optional[float] = None
         self._load_config()
 
     def _load_config(self):
@@ -55,19 +78,53 @@ class AutoRefresher:
                 cfg = json.load(f)
             self._cooldown = float(cfg.get("cooldown_secs", 0))
             for p in cfg.get("paths", []):
-                self._paths.add(os.path.expanduser(str(p)))
+                self._paths.add(os.path.realpath(os.path.expanduser(str(p))))
             _log.debug("autorefresh: watching %s", ", ".join(self._paths) or "(none)")
         except FileNotFoundError:
             pass
         except Exception as e:
             _log.warning("autorefresh: config error: %s", e)
 
+    def _maybe_reload_config(self):
+        """Re-read config if autorefresh.json has changed on disk."""
+        try:
+            cfg_mtime = Path(self.CONFIG_PATH).stat().st_mtime
+            if cfg_mtime != self._cfg_mtime:
+                self._cfg_mtime = cfg_mtime
+                self._load_config()
+        except OSError:
+            pass
+
     def register_path(self, path: str):
+        resolved = os.path.realpath(os.path.expanduser(str(path)))
         with self._lock:
-            self._paths.add(os.path.expanduser(path))
-            _log.debug("autorefresh: registered %s", path)
+            if resolved in self._paths:
+                return
+            if len(self._paths) >= MAX_WATCHED_PATHS:
+                _log.warning(
+                    "autorefresh: watchlist full (%d paths). "
+                    "Add path to autorefresh.json manually to persist it.",
+                    MAX_WATCHED_PATHS,
+                )
+                return
+            self._paths.add(resolved)
+
+        # Persist to config atomically
+        cfg_path = Path(self.CONFIG_PATH)
+        cfg_path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = cfg_path.with_suffix(".json.tmp")
+        try:
+            existing = json.loads(cfg_path.read_text()) if cfg_path.exists() else {}
+        except Exception:
+            existing = {}
+        paths_set = set(existing.get("paths", [])) | {resolved}
+        existing["paths"] = sorted(paths_set)
+        tmp.write_text(json.dumps(existing, indent=2))
+        tmp.replace(cfg_path)
+        _log.debug("autorefresh: registered and persisted %s", resolved)
 
     def maybe_refresh(self, storage_path: Optional[str]):
+        self._maybe_reload_config()
         now = time.monotonic()
         with self._lock:
             paths = list(self._paths)
@@ -77,8 +134,14 @@ class AutoRefresher:
                 if now - last < self._cooldown:
                     continue
                 self._last_refresh[path] = now
-            _log.debug("autorefresh: refreshing %s", path)
+
+            path_lock = _get_path_lock(path)
+            if not path_lock.acquire(blocking=False):
+                _log.debug("autorefresh: %s already refreshing, skipping", path)
+                continue
+
             try:
+                _log.debug("autorefresh: refreshing %s", path)
                 result = index_folder(
                     path=path,
                     use_ai_summaries=False,
@@ -94,9 +157,18 @@ class AutoRefresher:
                 )
             except Exception as e:
                 _log.warning("autorefresh: error refreshing %s: %s", path, e)
+            finally:
+                path_lock.release()
 
 
 auto_refresher = AutoRefresher()
+
+if os.environ.get("JCODEMUNCH_SHARE_SAVINGS", "1") != "0":
+    _log.info(
+        "jcodemunch: anonymous token-savings telemetry is ON. "
+        "Set JCODEMUNCH_SHARE_SAVINGS=0 to disable. "
+        "See README for details."
+    )
 
 
 # Create server
@@ -455,7 +527,7 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
     """Handle tool calls."""
     storage_path = os.environ.get("CODE_INDEX_PATH")
 
-    if name not in _INDEX_TOOLS:
+    if name in _REFRESH_TOOLS:
         loop = asyncio.get_event_loop()
         await loop.run_in_executor(None, auto_refresher.maybe_refresh, storage_path)
 

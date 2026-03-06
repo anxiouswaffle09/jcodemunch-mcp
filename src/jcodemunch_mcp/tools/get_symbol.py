@@ -54,8 +54,8 @@ def get_symbol(
     if not symbol:
         return {"error": f"Symbol not found: {symbol_id}"}
 
-    # Get source via byte-offset read
-    source = store.get_symbol_content(owner, name, symbol_id)
+    # Get source via byte-offset read (pass loaded index to avoid double load)
+    source = store.get_symbol_content(owner, name, symbol_id, index=index)
 
     # Add context lines if requested
     context_before = ""
@@ -150,6 +150,7 @@ def get_symbols(
 
     symbols = []
     errors = []
+    retrieved: dict[str, dict] = {}  # symbol_id -> symbol dict (avoids O(n²) re-scan)
 
     for symbol_id in symbol_ids:
         symbol = index.get_symbol(symbol_id)
@@ -158,7 +159,8 @@ def get_symbols(
             errors.append({"id": symbol_id, "error": f"Symbol not found: {symbol_id}"})
             continue
 
-        source = store.get_symbol_content(owner, name, symbol_id)
+        retrieved[symbol_id] = symbol
+        source = store.get_symbol_content(owner, name, symbol_id, index=index)
 
         symbols.append({
             "id": symbol["id"],
@@ -178,10 +180,7 @@ def get_symbols(
     raw_bytes = 0
     seen_files: set = set()
     response_bytes = 0
-    for symbol_id in symbol_ids:
-        symbol = index.get_symbol(symbol_id)
-        if not symbol:
-            continue
+    for symbol_id, symbol in retrieved.items():
         f = symbol["file"]
         if f not in seen_files:
             seen_files.add(f)

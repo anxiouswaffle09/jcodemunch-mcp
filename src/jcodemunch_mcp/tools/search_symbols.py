@@ -4,7 +4,7 @@ import os
 import time
 from typing import Optional
 
-from ..storage import IndexStore, CodeIndex, record_savings, estimate_savings, cost_avoided
+from ..storage import IndexStore, record_savings, estimate_savings, cost_avoided
 from ._utils import resolve_repo
 
 
@@ -51,12 +51,8 @@ def search_symbols(
     if not index:
         return {"error": f"Repository not indexed: {owner}/{name}"}
 
-    # Search — returns ALL matching symbols, sorted by score
-    results = index.search(query, kind=kind, file_pattern=file_pattern)
-
-    # Apply language filter (post-search since CodeIndex.search doesn't support it)
-    if language:
-        results = [s for s in results if s.get("language") == language]
+    # Search — returns ALL matching symbols, sorted by score, with language filter applied
+    results = index.search(query, kind=kind, file_pattern=file_pattern, language=language)
 
     total_hits = len(results)
 
@@ -68,13 +64,9 @@ def search_symbols(
 
     truncated = (not exhaustive) and (offset + len(page)) < total_hits
 
-    # Score and format
-    query_lower = query.lower()
-    query_words = set(query_lower.split())
-
+    # Format results — score is already embedded by CodeIndex.search
     scored_results = []
     for sym in page:
-        score = _calculate_score(sym, query_lower, query_words)
         scored_results.append({
             "id": sym["id"],
             "kind": sym["kind"],
@@ -83,7 +75,7 @@ def search_symbols(
             "line": sym["line"],
             "signature": sym["signature"],
             "summary": sym.get("summary", ""),
-            "score": score
+            "score": sym.get("score", 0),
         })
 
     # Token savings: files containing matches vs symbol byte_lengths of results
@@ -132,49 +124,3 @@ def search_symbols(
         )
 
     return response
-
-
-def _calculate_score(sym: dict, query_lower: str, query_words: set) -> int:
-    """Calculate search score for a symbol."""
-    score = 0
-
-    # 1. Exact name match (highest weight)
-    name_lower = sym.get("name", "").lower()
-    if query_lower == name_lower:
-        score += 20
-    elif query_lower in name_lower:
-        score += 10
-
-    # 2. Name word overlap
-    for word in query_words:
-        if word in name_lower:
-            score += 5
-
-    # 3. Signature match
-    sig_lower = sym.get("signature", "").lower()
-    if query_lower in sig_lower:
-        score += 8
-    for word in query_words:
-        if word in sig_lower:
-            score += 2
-
-    # 4. Summary match
-    summary_lower = sym.get("summary", "").lower()
-    if query_lower in summary_lower:
-        score += 5
-    for word in query_words:
-        if word in summary_lower:
-            score += 1
-
-    # 5. Keyword match
-    keywords = set(sym.get("keywords", []))
-    matching_keywords = query_words & keywords
-    score += len(matching_keywords) * 3
-
-    # 6. Docstring match
-    doc_lower = sym.get("docstring", "").lower()
-    for word in query_words:
-        if word in doc_lower:
-            score += 1
-
-    return score

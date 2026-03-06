@@ -64,16 +64,24 @@ def search_text(
     query_match = query if exact else query.lower()
     all_matches = []
     files_searched = 0
+    response_warning: Optional[str] = None
+
+    MAX_SEARCH_BYTES = 50 * 1024 * 1024  # 50MB guard
+    bytes_read = 0
 
     for file_path in files:
-        full_path = content_dir / file_path
-        if not full_path.exists():
+        if bytes_read > MAX_SEARCH_BYTES:
+            response_warning = "Search stopped at 50MB — use file_pattern to narrow scope"
+            break
+        full_path = store._safe_content_path(content_dir, file_path)
+        if not full_path or not full_path.exists():
             continue
 
         try:
             content = full_path.read_text(encoding="utf-8", errors="replace")
         except Exception:
             continue
+        bytes_read += len(content)
 
         files_searched += 1
         lines = content.split("\n")
@@ -128,7 +136,9 @@ def search_text(
         },
     }
 
-    if truncated:
+    if response_warning:
+        response["warning"] = response_warning
+    elif truncated:
         response["warning"] = (
             f"WARNING: results truncated — showing {offset}–{offset + len(page)} "
             f"of {total_hits} total matches. "

@@ -54,8 +54,7 @@ def get_file_tree(
     elapsed = (time.perf_counter() - start) * 1000
 
     # Token savings: sum of raw file sizes vs compact tree response
-    store2 = IndexStore(base_path=storage_path)
-    content_dir = store2._content_dir(owner, name)
+    content_dir = store._content_dir(owner, name)
     raw_bytes = 0
     for f in files:
         try:
@@ -66,7 +65,7 @@ def get_file_tree(
     tokens_saved = estimate_savings(raw_bytes, response_bytes)
     total_saved = record_savings(tokens_saved)
 
-    return {
+    result: dict = {
         "repo": f"{owner}/{name}",
         "path_prefix": path_prefix,
         "tree": tree,
@@ -78,6 +77,16 @@ def get_file_tree(
             **cost_avoided(tokens_saved, total_saved),
         },
     }
+
+    if include_summaries and not any(
+        node.get("summary") for node in _flatten_tree_nodes(tree)
+    ):
+        result["warning"] = (
+            "include_summaries=True but no file summaries are available. "
+            "Re-index with a recent version to generate them."
+        )
+
+    return result
 
 
 def _build_tree(files: list[str], index, path_prefix: str, include_summaries: bool = False) -> list[dict]:
@@ -130,6 +139,15 @@ def _build_tree(files: list[str], index, path_prefix: str, include_summaries: bo
     
     # Convert to list format
     return _dict_to_list(root)
+
+
+def _flatten_tree_nodes(tree: list[dict]) -> list[dict]:
+    """Yield all file nodes from a nested tree."""
+    for node in tree:
+        if node.get("type") == "file":
+            yield node
+        else:
+            yield from _flatten_tree_nodes(node.get("children", []))
 
 
 def _dict_to_list(node_dict: dict) -> list[dict]:

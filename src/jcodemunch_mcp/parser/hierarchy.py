@@ -35,6 +35,26 @@ def build_symbol_tree(symbols: list[Symbol]) -> list[SymbolNode]:
     return roots
 
 
+def build_symbol_tree_from_dicts(symbol_dicts: list[dict]) -> list[dict]:
+    """Build hierarchical tree directly from raw symbol dicts.
+
+    Avoids the Symbol dataclass roundtrip used in the original build_symbol_tree.
+    Returns a list of top-level node dicts, each with an optional 'children' list.
+    """
+    node_map: dict[str, dict] = {s["id"]: dict(s) for s in symbol_dicts}
+
+    roots: list[dict] = []
+    for sym in symbol_dicts:
+        parent_id = sym.get("parent")
+        if parent_id and parent_id in node_map:
+            parent_node = node_map[parent_id]
+            parent_node.setdefault("_children", []).append(node_map[sym["id"]])
+        else:
+            roots.append(node_map[sym["id"]])
+
+    return roots
+
+
 def flatten_tree(nodes: list[SymbolNode], depth: int = 0) -> list[tuple[Symbol, int]]:
     """Flatten symbol tree with depth information.
     
