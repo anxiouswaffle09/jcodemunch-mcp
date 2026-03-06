@@ -469,6 +469,8 @@ class IndexStore:
         repos = []
 
         for index_file in self.base_path.glob("*.json"):
+            if index_file.name.endswith("-refs.json"):
+                continue
             try:
                 with open(index_file, "r", encoding="utf-8") as f:
                     data = json.load(f)

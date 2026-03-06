@@ -381,7 +381,7 @@ async def list_tools() -> list[Tool]:
         ),
         Tool(
             name="find_references",
-            description="Find all references to a symbol (calls, struct constructions, field accesses). Returns production_refs and test_refs counts separately. Warns if a symbol is only referenced from tests.",
+            description="Find all references to a symbol (calls, struct constructions, field accesses). Returns production_refs and test_refs counts separately. Cross-reference extraction currently supports Rust and Python; other repo languages return coverage warnings. Ambiguous short-name matches return candidates instead of conflated results.",
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -395,7 +395,7 @@ async def list_tools() -> list[Tool]:
         ),
         Tool(
             name="find_callers",
-            description="Find all call sites for a function or method. Use to verify a function is actually called in production code.",
+            description="Find all call sites for a function or method. Use to verify a function is actually called in production code. Cross-reference extraction currently supports Rust and Python; ambiguous short-name matches return candidates instead of merged results.",
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -409,7 +409,7 @@ async def list_tools() -> list[Tool]:
         ),
         Tool(
             name="find_constructors",
-            description="Find all construction sites for a struct or class (::new calls and struct literals). Use to verify a type is actually instantiated in production — the SpectralAnalyzer check.",
+            description="Find all construction sites for a struct or class (::new calls and struct literals). Use to verify a type is actually instantiated in production. Cross-reference extraction currently supports Rust and Python; ambiguous short-name matches return candidates instead of merged results.",
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -423,7 +423,7 @@ async def list_tools() -> list[Tool]:
         ),
         Tool(
             name="find_field_reads",
-            description="Find all read sites for a struct field or object attribute.",
+            description="Find all read sites for a struct field or object attribute. Cross-reference extraction currently supports Rust and Python; other repo languages return coverage warnings.",
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -436,7 +436,7 @@ async def list_tools() -> list[Tool]:
         ),
         Tool(
             name="find_field_writes",
-            description="Find all write sites for a struct field or object attribute.",
+            description="Find all write sites for a struct field or object attribute. Cross-reference extraction currently supports Rust and Python; other repo languages return coverage warnings.",
             inputSchema={
                 "type": "object",
                 "properties": {

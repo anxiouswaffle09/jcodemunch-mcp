@@ -3,12 +3,13 @@
 import asyncio
 import hashlib
 import os
+from types import SimpleNamespace
 from typing import Optional
 from urllib.parse import urlparse
 
 import httpx
 
-from ..parser import parse_file, LANGUAGE_EXTENSIONS
+from ..parser import LANGUAGE_EXTENSIONS, extract_refs, parse_file
 from ..security import is_secret_file, is_binary_extension, get_max_index_files
 from ..storage import IndexStore
 from ..summarizer import summarize_symbols
@@ -314,12 +315,48 @@ async def index_repo(
 
             new_symbols = summarize_symbols(new_symbols, use_ai=use_ai_summaries)
 
+            needs_full_backfill = store.load_refs(owner, repo) is None
             updated = store.incremental_save(
                 owner=owner, name=repo,
                 changed_files=changed, new_files=new, deleted_files=deleted,
                 new_symbols=new_symbols, raw_files=raw_files_subset,
                 languages={},
             )
+
+            if needs_full_backfill:
+                # No refs.json existed — backfill refs for all current files
+                all_sym_dicts = updated.symbols if updated else []
+                all_refs = []
+                for path, content in current_files.items():
+                    _, ext = os.path.splitext(path)
+                    language = LANGUAGE_EXTENSIONS.get(ext)
+                    if not language:
+                        continue
+                    try:
+                        proxies = [
+                            SimpleNamespace(line=s["line"], end_line=s["end_line"],
+                                            id=s["id"], file=s["file"])
+                            for s in all_sym_dicts if s.get("file") == path
+                        ]
+                        all_refs.extend(extract_refs(content, path, language, proxies))
+                    except Exception:
+                        pass
+                store.save_refs(owner, repo, all_refs)
+            else:
+                incremental_refs = []
+                for path in files_to_parse:
+                    content = current_files[path]
+                    _, ext = os.path.splitext(path)
+                    language = LANGUAGE_EXTENSIONS.get(ext)
+                    if not language:
+                        continue
+                    try:
+                        file_symbols = [s for s in new_symbols if s.file == path]
+                        incremental_refs.extend(extract_refs(content, path, language, file_symbols))
+                    except Exception:
+                        warnings.append(f"Failed to extract refs for {path}")
+                removed = set(changed) | set(deleted)
+                store.merge_refs(owner, repo, incremental_refs, removed)
 
             result = {
                 "success": True,
@@ -328,6 +365,7 @@ async def index_repo(
                 "changed": len(changed), "new": len(new), "deleted": len(deleted),
                 "symbol_count": len(updated.symbols) if updated else 0,
                 "indexed_at": updated.indexed_at if updated else "",
+                "ref_count": len(store.load_refs(owner, repo) or []),
             }
             if warnings:
                 result["warnings"] = warnings
@@ -346,11 +384,11 @@ async def index_repo(
                 continue
             try:
                 symbols = parse_file(content, path, language)
+                raw_files[path] = content
                 if symbols:
                     all_symbols.extend(symbols)
                     file_language = symbols[0].language or language
                     languages[file_language] = languages.get(file_language, 0) + 1
-                    raw_files[path] = content
                     parsed_files.append(path)
             except Exception:
                 warnings.append(f"Failed to parse {path}")
@@ -372,12 +410,25 @@ async def index_repo(
         store.save_index(
             owner=owner,
             name=repo,
-            source_files=parsed_files,
+            source_files=sorted(current_files),
             symbols=all_symbols,
             raw_files=raw_files,
             languages=languages,
             file_hashes=file_hashes,
         )
+
+        all_refs = []
+        for path, content in current_files.items():
+            _, ext = os.path.splitext(path)
+            language = LANGUAGE_EXTENSIONS.get(ext)
+            if not language:
+                continue
+            try:
+                file_symbols = [s for s in all_symbols if s.file == path]
+                all_refs.extend(extract_refs(content, path, language, file_symbols))
+            except Exception:
+                warnings.append(f"Failed to extract refs for {path}")
+        store.save_refs(owner, repo, all_refs)
 
         result = {
             "success": True,
@@ -385,6 +436,7 @@ async def index_repo(
             "indexed_at": store.load_index(owner, repo).indexed_at,
             "file_count": len(parsed_files),
             "symbol_count": len(all_symbols),
+            "ref_count": len(all_refs),
             "languages": languages,
             "files": parsed_files[:20],  # Limit files in response
         }

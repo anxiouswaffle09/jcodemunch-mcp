@@ -4,6 +4,7 @@ import hashlib
 import logging
 import os
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Optional
 
 import pathspec
@@ -341,6 +342,7 @@ def index_folder(
             from ..storage.index_store import _get_git_head
             git_head = _get_git_head(folder_path) or ""
 
+            needs_full_backfill = store.load_refs(owner, repo_name) is None
             updated = store.incremental_save(
                 owner=owner, name=repo_name,
                 changed_files=changed, new_files=new, deleted_files=deleted,
@@ -348,21 +350,41 @@ def index_folder(
                 languages={}, git_head=git_head,
             )
 
-            # Update cross-references for changed/new files only
-            incremental_refs: list[dict] = []
-            for rel_path in files_to_parse:
-                content = current_files[rel_path]
-                ext = os.path.splitext(rel_path)[1]
-                language = LANGUAGE_EXTENSIONS.get(ext)
-                if not language:
-                    continue
-                try:
-                    file_symbols = [s for s in new_symbols if s.file == rel_path]
-                    incremental_refs.extend(extract_refs(content, rel_path, language, file_symbols))
-                except Exception:
-                    pass
-            removed = set(changed) | set(deleted)
-            store.merge_refs(owner, repo_name, incremental_refs, removed)
+            if needs_full_backfill:
+                # No refs.json existed — backfill refs for all current files
+                all_sym_dicts = updated.symbols if updated else []
+                all_refs: list[dict] = []
+                for rel_path, content in current_files.items():
+                    ext = os.path.splitext(rel_path)[1]
+                    language = LANGUAGE_EXTENSIONS.get(ext)
+                    if not language:
+                        continue
+                    try:
+                        proxies = [
+                            SimpleNamespace(line=s["line"], end_line=s["end_line"],
+                                            id=s["id"], file=s["file"])
+                            for s in all_sym_dicts if s.get("file") == rel_path
+                        ]
+                        all_refs.extend(extract_refs(content, rel_path, language, proxies))
+                    except Exception:
+                        pass
+                store.save_refs(owner, repo_name, all_refs)
+            else:
+                # Update cross-references for changed/new files only
+                incremental_refs: list[dict] = []
+                for rel_path in files_to_parse:
+                    content = current_files[rel_path]
+                    ext = os.path.splitext(rel_path)[1]
+                    language = LANGUAGE_EXTENSIONS.get(ext)
+                    if not language:
+                        continue
+                    try:
+                        file_symbols = [s for s in new_symbols if s.file == rel_path]
+                        incremental_refs.extend(extract_refs(content, rel_path, language, file_symbols))
+                    except Exception:
+                        pass
+                removed = set(changed) | set(deleted)
+                store.merge_refs(owner, repo_name, incremental_refs, removed)
 
             result = {
                 "success": True,
@@ -372,6 +394,7 @@ def index_folder(
                 "changed": len(changed), "new": len(new), "deleted": len(deleted),
                 "symbol_count": len(updated.symbols) if updated else 0,
                 "indexed_at": updated.indexed_at if updated else "",
+                "ref_count": len(store.load_refs(owner, repo_name) or []),
                 "discovery_skip_counts": skip_counts,
                 "no_symbols_count": len(incremental_no_symbols),
                 "no_symbols_files": incremental_no_symbols[:50],
@@ -394,11 +417,11 @@ def index_folder(
                 continue
             try:
                 symbols = parse_file(content, rel_path, language)
+                raw_files[rel_path] = content
                 if symbols:
                     all_symbols.extend(symbols)
                     file_language = symbols[0].language or language
                     languages[file_language] = languages.get(file_language, 0) + 1
-                    raw_files[rel_path] = content
                     parsed_files.append(rel_path)
                 else:
                     no_symbols_files.append(rel_path)
@@ -430,7 +453,7 @@ def index_folder(
         store.save_index(
             owner=owner,
             name=repo_name,
-            source_files=parsed_files,
+            source_files=sorted(current_files),
             symbols=all_symbols,
             raw_files=raw_files,
             languages=languages,
@@ -439,7 +462,7 @@ def index_folder(
 
         # Extract and save cross-references
         all_refs = []
-        for rel_path, content in raw_files.items():
+        for rel_path, content in current_files.items():
             ext = os.path.splitext(rel_path)[1]
             language = LANGUAGE_EXTENSIONS.get(ext)
             if not language:

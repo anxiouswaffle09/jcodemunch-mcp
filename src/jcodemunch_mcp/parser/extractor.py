@@ -7,6 +7,8 @@ from tree_sitter_language_pack import get_parser
 from .symbols import Symbol, make_symbol_id, compute_content_hash
 from .languages import LanguageSpec, LANGUAGE_REGISTRY
 
+SUPPORTED_REF_LANGUAGES = frozenset({"python", "rust"})
+
 
 def parse_file(content: str, filename: str, language: str) -> list[Symbol]:
     """Parse source code and extract symbols using tree-sitter.
@@ -595,12 +597,13 @@ def _clean_comment_markers(text: str) -> str:
             line = line[3:]
         elif line.startswith("/*"):
             line = line[2:]
+        # Must check longer prefixes before shorter ones (/// and //! before //)
         elif line.startswith("///"):
+            line = line[3:]
+        elif line.startswith("//!"):
             line = line[3:]
         elif line.startswith("//"):
             line = line[2:]
-        elif line.startswith("//!"):
-            line = line[3:]
         elif line.startswith("*"):
             line = line[1:]
         
@@ -859,7 +862,7 @@ def extract_refs(content: str, filename: str, language: str, symbols: list[Symbo
             "is_test":         bool,
         }
     """
-    if language not in LANGUAGE_REGISTRY:
+    if language not in LANGUAGE_REGISTRY or language not in SUPPORTED_REF_LANGUAGES:
         return []
 
     spec = LANGUAGE_REGISTRY[language]
@@ -1026,18 +1029,23 @@ def _collect_refs(
 
         # Attribute access: obj.attr (read)
         elif node_type == "attribute":
-            attr_node = node.child_by_field_name("attribute")
-            if attr_node:
-                attr_name = source_bytes[attr_node.start_byte:attr_node.end_byte].decode("utf-8")
-                ref_type = "field_write" if _is_assignment_lhs(node) else "field_read"
-                refs.append({
-                    "callee": attr_name,
-                    "ref_type": ref_type,
-                    "caller_file": filename,
-                    "caller_line": line,
-                    "caller_symbol_id": find_caller(line),
-                    "is_test": is_test,
-                })
+            parent = node.parent
+            func_field = parent.child_by_field_name("function") if parent and parent.type == "call" else None
+            if func_field is not None and func_field.start_byte == node.start_byte:
+                pass  # method call target — already captured as "call"
+            else:
+                attr_node = node.child_by_field_name("attribute")
+                if attr_node:
+                    attr_name = source_bytes[attr_node.start_byte:attr_node.end_byte].decode("utf-8")
+                    ref_type = "field_write" if _is_assignment_lhs(node) else "field_read"
+                    refs.append({
+                        "callee": attr_name,
+                        "ref_type": ref_type,
+                        "caller_file": filename,
+                        "caller_line": line,
+                        "caller_symbol_id": find_caller(line),
+                        "is_test": is_test,
+                    })
 
     # Recurse
     for child in node.children:
@@ -1081,7 +1089,7 @@ def _is_assignment_lhs(node) -> bool:
         return False
     # Rust: assignment_expression, compound_assignment_expression
     # Python: assignment
-    if parent.type in ("assignment_expression", "compound_assignment_expression", "assignment"):
+    if parent.type in ("assignment_expression", "compound_assignment_expression", "assignment", "augmented_assignment"):
         lhs = parent.child_by_field_name("left")
         if lhs is not None and lhs == node:
             return True
