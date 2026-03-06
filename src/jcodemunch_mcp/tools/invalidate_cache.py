@@ -3,7 +3,7 @@
 from typing import Optional
 
 from ..storage import IndexStore
-from ._utils import invalidate_repo_name_cache
+from ._utils import invalidate_repo_name_cache, resolve_repo
 
 
 def invalidate_cache(
@@ -26,12 +26,13 @@ def invalidate_cache(
     if "/" in repo:
         owner, name = repo.split("/", 1)
     else:
-        store = IndexStore(base_path=storage_path)
-        repos = store.list_repos()
-        matching = [r for r in repos if r["repo"].endswith(f"/{repo}")]
-        if not matching:
-            return {"error": f"Repository not found: {repo}"}
-        owner, name = matching[0]["repo"].split("/", 1)
+        try:
+            owner, name = resolve_repo(repo, storage_path=storage_path)
+        except ValueError as e:
+            return {
+                "success": False,
+                "error": str(e),
+            }
 
     store = IndexStore(base_path=storage_path)
     deleted = store.delete_index(owner, name)

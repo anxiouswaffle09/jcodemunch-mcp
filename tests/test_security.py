@@ -343,6 +343,40 @@ class TestDiscoverLocalFilesSecure:
         assert "real.py" in names
         assert "link.py" not in names
 
+    @pytest.mark.skipif(sys.platform == "win32", reason="Symlinks unreliable on Windows")
+    def test_follow_symlinks_does_not_recurse_forever(self, tmp_path):
+        """In-root symlink loops should be pruned instead of duplicating files forever."""
+        from jcodemunch_mcp.tools.index_folder import discover_local_files
+
+        (tmp_path / "a").mkdir()
+        (tmp_path / "f.py").write_text("def f():\n    pass\n", encoding="utf-8")
+        (tmp_path / "a" / "loop").symlink_to(tmp_path, target_is_directory=True)
+
+        files, _, skip_counts = discover_local_files(
+            tmp_path,
+            max_files=10,
+            follow_symlinks=True,
+        )
+
+        rel_paths = [f.relative_to(tmp_path).as_posix() for f in files]
+        assert rel_paths == ["f.py"]
+        assert skip_counts["file_limit"] == 0
+
+    @pytest.mark.skipif(sys.platform == "win32", reason="Symlinks unreliable on Windows")
+    def test_follow_symlinks_avoids_directory_loops(self, tmp_path):
+        """Following symlinks should not recurse through the same real directory forever."""
+        from jcodemunch_mcp.tools.index_folder import discover_local_files
+
+        (tmp_path / "pkg").mkdir()
+        (tmp_path / "pkg" / "main.py").write_text("def main():\n    pass\n", encoding="utf-8")
+        (tmp_path / "pkg" / "loop").symlink_to(tmp_path, target_is_directory=True)
+
+        files, _, skip_counts = discover_local_files(tmp_path, follow_symlinks=True, max_files=20)
+        rel_paths = [f.relative_to(tmp_path).as_posix() for f in files]
+
+        assert rel_paths == ["pkg/main.py"]
+        assert skip_counts["file_limit"] == 0
+
 
 # --- Index repo secret filtering ---
 

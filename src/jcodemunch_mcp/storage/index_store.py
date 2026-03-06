@@ -6,6 +6,7 @@ import os
 import shutil
 import subprocess
 import sys
+import tempfile
 import threading
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -39,6 +40,30 @@ def _file_hash(content: str) -> str:
     return hashlib.sha256(content.encode("utf-8")).hexdigest()
 
 
+_FULL_FINGERPRINT_BYTES = 8192
+_FINGERPRINT_WINDOW_BYTES = 2048
+
+
+def _path_fingerprint(path: Path, stat_result: Optional[os.stat_result] = None) -> str:
+    """Hash a bounded sample of the file to cheaply detect non-git rewrites."""
+    stat_result = stat_result or path.stat()
+    if stat_result.st_size <= _FULL_FINGERPRINT_BYTES:
+        with open(path, "rb") as f:
+            return hashlib.sha256(f.read()).hexdigest()
+
+    window = min(_FINGERPRINT_WINDOW_BYTES, stat_result.st_size)
+    middle_start = max((stat_result.st_size - window) // 2, 0)
+    tail_start = max(stat_result.st_size - window, 0)
+
+    with open(path, "rb") as f:
+        head = f.read(window)
+        f.seek(middle_start)
+        middle = f.read(window)
+        f.seek(tail_start)
+        tail = f.read(window)
+    return hashlib.sha256(head + middle + tail).hexdigest()
+
+
 def _get_git_head(repo_path: Path) -> Optional[str]:
     """Get current HEAD commit hash for a git repo, or None."""
     try:
@@ -55,12 +80,16 @@ def _get_git_head(repo_path: Path) -> Optional[str]:
 
 
 def _make_file_meta(path: Path, content: str) -> dict:
-    """Build file metadata dict with sha256 + mtime + size."""
+    """Build file metadata dict with sha256 plus stat fields for fast change checks."""
     stat = path.stat()
     return {
         "sha256": _file_hash(content),
+        "sample_sha256": _path_fingerprint(path, stat),
         "mtime": stat.st_mtime,
+        "mtime_ns": stat.st_mtime_ns,
+        "ctime_ns": stat.st_ctime_ns,
         "size": stat.st_size,
+        "inode": getattr(stat, "st_ino", None),
     }
 
 
@@ -286,6 +315,22 @@ class IndexStore:
         except (OSError, ValueError):
             return None
 
+    def _reserve_temp_path(self, prefix: str) -> Path:
+        """Return a unique path under base_path that does not yet exist."""
+        temp_dir = Path(tempfile.mkdtemp(prefix=prefix, dir=str(self.base_path)))
+        shutil.rmtree(temp_dir, ignore_errors=True)
+        return temp_dir
+
+    def _write_raw_files(self, content_dir: Path, raw_files: dict[str, str]) -> None:
+        """Validate and write raw files into content_dir."""
+        for file_path, content in raw_files.items():
+            file_dest = self._safe_content_path(content_dir, file_path)
+            if not file_dest:
+                raise ValueError(f"Unsafe file path in raw_files: {file_path}")
+            file_dest.parent.mkdir(parents=True, exist_ok=True)
+            with open(file_dest, "w", encoding="utf-8") as f:
+                f.write(content)
+
     def save_index(
         self,
         owner: str,
@@ -344,26 +389,41 @@ class IndexStore:
             git_head=git_head,
         )
 
-        # Save index JSON atomically: write to temp then rename
         index_path = self._index_path(owner, name)
         tmp_path = index_path.with_suffix(".json.tmp")
         with open(tmp_path, "w", encoding="utf-8") as f:
             json.dump(self._index_to_dict(index), f, indent=2)
-        # Atomic rename (on POSIX; best-effort on Windows)
-        tmp_path.replace(index_path)
-        _invalidate_index_cache(index_path)
-
-        # Save raw files
         content_dir = self._content_dir(owner, name)
-        content_dir.mkdir(parents=True, exist_ok=True)
+        staged_content_dir = self._reserve_temp_path(f"{content_dir.name}-stage-")
+        backup_dir: Optional[Path] = None
+        content_swapped = False
 
-        for file_path, content in raw_files.items():
-            file_dest = self._safe_content_path(content_dir, file_path)
-            if not file_dest:
-                raise ValueError(f"Unsafe file path in raw_files: {file_path}")
-            file_dest.parent.mkdir(parents=True, exist_ok=True)
-            with open(file_dest, "w", encoding="utf-8") as f:
-                f.write(content)
+        try:
+            staged_content_dir.mkdir(parents=True, exist_ok=True)
+            self._write_raw_files(staged_content_dir, raw_files)
+
+            if content_dir.exists():
+                backup_dir = self._reserve_temp_path(f"{content_dir.name}-backup-")
+                content_dir.replace(backup_dir)
+            staged_content_dir.replace(content_dir)
+            content_swapped = True
+
+            # Publish the new metadata only after the new raw files are in place.
+            tmp_path.replace(index_path)
+            _invalidate_index_cache(index_path)
+        except Exception:
+            if content_swapped and content_dir.exists():
+                shutil.rmtree(content_dir, ignore_errors=True)
+            if backup_dir and backup_dir.exists():
+                backup_dir.replace(content_dir)
+            raise
+        finally:
+            if staged_content_dir.exists():
+                shutil.rmtree(staged_content_dir, ignore_errors=True)
+            if backup_dir and backup_dir.exists():
+                shutil.rmtree(backup_dir, ignore_errors=True)
+            if tmp_path.exists():
+                tmp_path.unlink(missing_ok=True)
 
         return index
 
@@ -517,11 +577,27 @@ class IndexStore:
             if used_git and rel_path in git_modified:
                 possibly_changed.append(rel_path)
                 continue
-            # mtime + size fast check
+            # Require the richer metadata set; older indexes hash once to upgrade safely.
+            if any(key not in meta for key in ("mtime_ns", "ctime_ns", "size", "inode")):
+                possibly_changed.append(rel_path)
+                continue
+
+            # Fast stat check before falling back to hashing.
             abs_path = current_rel[rel_path]
             try:
                 stat = abs_path.stat()
-                if stat.st_mtime != meta.get("mtime") or stat.st_size != meta.get("size"):
+                if (
+                    stat.st_mtime_ns != meta.get("mtime_ns")
+                    or stat.st_ctime_ns != meta.get("ctime_ns")
+                    or stat.st_size != meta.get("size")
+                    or getattr(stat, "st_ino", None) != meta.get("inode")
+                ):
+                    possibly_changed.append(rel_path)
+                    continue
+                if not used_git and meta.get("sample_sha256"):
+                    if _path_fingerprint(abs_path, stat) != meta.get("sample_sha256"):
+                        possibly_changed.append(rel_path)
+                elif not used_git:
                     possibly_changed.append(rel_path)
             except OSError:
                 deleted.append(rel_path)
@@ -575,7 +651,11 @@ class IndexStore:
         deleted_files = list(old_set - new_set)
         changed_files = [
             fp for fp in (old_set & new_set)
-            if old_hashes[fp] != current_hashes[fp]
+            if (
+                old_hashes[fp]
+                if isinstance(old_hashes[fp], str)
+                else old_hashes[fp].get("sha256", "")
+            ) != current_hashes[fp]
         ]
 
         return changed_files, new_files, deleted_files
@@ -669,34 +749,66 @@ class IndexStore:
             git_head=git_head,
         )
 
-        # Save atomically
         index_path = self._index_path(owner, name)
         tmp_path = index_path.with_suffix(".json.tmp")
         with open(tmp_path, "w", encoding="utf-8") as f:
             json.dump(self._index_to_dict(updated), f, indent=2)
-        tmp_path.replace(index_path)
-        _invalidate_index_cache(index_path)
-
-        # Update raw files
         content_dir = self._content_dir(owner, name)
         content_dir.mkdir(parents=True, exist_ok=True)
+        staged_content_dir = self._reserve_temp_path(f"{content_dir.name}-stage-")
+        rollback_dir = self._reserve_temp_path(f"{content_dir.name}-rollback-")
+        affected_files = set(raw_files) | set(deleted_files)
+        backed_up_files: set[str] = set()
 
-        # Remove deleted files from content dir
-        for fp in deleted_files:
-            dead = self._safe_content_path(content_dir, fp)
-            if not dead:
-                continue
-            if dead.exists():
-                dead.unlink()
+        try:
+            staged_content_dir.mkdir(parents=True, exist_ok=True)
+            rollback_dir.mkdir(parents=True, exist_ok=True)
+            self._write_raw_files(staged_content_dir, raw_files)
 
-        # Write changed + new files
-        for fp, content in raw_files.items():
-            dest = self._safe_content_path(content_dir, fp)
-            if not dest:
-                raise ValueError(f"Unsafe file path in raw_files: {fp}")
-            dest.parent.mkdir(parents=True, exist_ok=True)
-            with open(dest, "w", encoding="utf-8") as f:
-                f.write(content)
+            for fp in affected_files:
+                src = self._safe_content_path(content_dir, fp)
+                backup = self._safe_content_path(rollback_dir, fp)
+                if not src or not backup:
+                    raise ValueError(f"Unsafe file path in raw_files: {fp}")
+                if not src.exists():
+                    continue
+                backup.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(src, backup)
+                backed_up_files.add(fp)
+
+            # Apply content changes before publishing the new metadata.
+            for fp in deleted_files:
+                dead = self._safe_content_path(content_dir, fp)
+                if dead and dead.exists():
+                    dead.unlink()
+
+            for fp in raw_files:
+                staged = self._safe_content_path(staged_content_dir, fp)
+                dest = self._safe_content_path(content_dir, fp)
+                if not staged or not dest:
+                    raise ValueError(f"Unsafe file path in raw_files: {fp}")
+                dest.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copyfile(staged, dest)
+
+            tmp_path.replace(index_path)
+            _invalidate_index_cache(index_path)
+        except Exception:
+            for fp in affected_files:
+                dest = self._safe_content_path(content_dir, fp)
+                backup = self._safe_content_path(rollback_dir, fp)
+                if not dest:
+                    continue
+                if fp in backed_up_files and backup and backup.exists():
+                    dest.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.copyfile(backup, dest)
+                elif dest.exists():
+                    dest.unlink()
+            raise
+        finally:
+            shutil.rmtree(staged_content_dir, ignore_errors=True)
+            shutil.rmtree(rollback_dir, ignore_errors=True)
+            if tmp_path.exists():
+                tmp_path.unlink(missing_ok=True)
 
         return updated
 

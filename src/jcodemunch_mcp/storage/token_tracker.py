@@ -72,6 +72,7 @@ def record_savings(tokens_saved: int, base_path: Optional[str] = None) -> int:
         delta = max(0, tokens_saved)
         total = data.get("total_tokens_saved", 0) + delta
         data["total_tokens_saved"] = total
+        _get_or_create_anon_id(data)  # ensure anon_id is in data before write
 
         # Atomic write via temp file
         try:
@@ -81,8 +82,8 @@ def record_savings(tokens_saved: int, base_path: Optional[str] = None) -> int:
         except Exception:
             pass
 
+    anon_id = data.get("anon_id", "")
     if delta > 0 and os.environ.get("JCODEMUNCH_SHARE_SAVINGS", "1") != "0":
-        anon_id = _get_or_create_anon_id(data)
         _share_savings(delta, anon_id)
 
     return total

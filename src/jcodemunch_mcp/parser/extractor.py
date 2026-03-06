@@ -140,6 +140,10 @@ def _walk_tree(
         ns_name = _extract_cpp_namespace_name(node, source_bytes)
         if ns_name:
             local_scope_parts = [*local_scope_parts, ns_name]
+    elif language == "rust" and node.type == "impl_item":
+        impl_parent = _resolve_rust_impl_parent(node, source_bytes, symbols)
+        if impl_parent:
+            next_parent = impl_parent
 
     # Check if this node is a symbol
     if node.type in spec.symbol_node_types:
@@ -337,6 +341,57 @@ def _extract_name(node, spec: LanguageSpec, source_bytes: bytes) -> Optional[str
                 break
         return source_bytes[name_node.start_byte:name_node.end_byte].decode("utf-8")
     
+    return None
+
+
+def _resolve_rust_impl_parent(node, source_bytes: bytes, symbols: list[Symbol]) -> Optional[Symbol]:
+    """Map a Rust impl block to the previously indexed type symbol it extends."""
+    type_node = node.child_by_field_name("type")
+    if not type_node:
+        return None
+
+    type_name = _extract_rust_type_name(type_node, source_bytes)
+    if not type_name:
+        return None
+
+    for symbol in reversed(symbols):
+        if symbol.language != "rust":
+            continue
+        if symbol.kind not in {"type", "class"}:
+            continue
+        if symbol.name == type_name:
+            return symbol
+
+    return None
+
+
+def _extract_rust_type_name(node, source_bytes: bytes) -> Optional[str]:
+    """Extract the display name of a Rust type reference."""
+    direct_types = {
+        "type_identifier",
+        "identifier",
+        "scoped_identifier",
+        "generic_type",
+        "primitive_type",
+        "self",
+    }
+    if node.type in {"type_identifier", "identifier", "primitive_type"}:
+        return source_bytes[node.start_byte:node.end_byte].decode("utf-8")
+    if node.type == "scoped_identifier":
+        name_node = node.child_by_field_name("name")
+        if name_node:
+            return _extract_rust_type_name(name_node, source_bytes)
+    if node.type == "generic_type":
+        type_child = node.child_by_field_name("type")
+        if type_child:
+            return _extract_rust_type_name(type_child, source_bytes)
+    if node.type in direct_types:
+        for child in node.children:
+            if not child.is_named:
+                continue
+            name = _extract_rust_type_name(child, source_bytes)
+            if name:
+                return name
     return None
 
 

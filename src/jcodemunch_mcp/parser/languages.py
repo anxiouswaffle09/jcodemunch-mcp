@@ -199,7 +199,6 @@ RUST_SPEC = LanguageSpec(
         "struct_item": "type",
         "enum_item": "type",
         "trait_item": "type",
-        "impl_item": "class",
         "type_item": "type",
     },
     name_fields={

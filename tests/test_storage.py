@@ -1,7 +1,9 @@
 """Tests for storage module."""
 
+import os
 import pytest
 import json
+import time
 from pathlib import Path
 
 from jcodemunch_mcp.storage import IndexStore, CodeIndex
@@ -133,6 +135,108 @@ def test_save_index_rejects_path_traversal_in_raw_files(tmp_path):
             raw_files={"../../escape.py": "print('x')"},
             languages={"python": 1},
         )
+
+    assert store.load_index("evil", "repo") is None
+
+
+def test_incremental_save_rolls_back_on_invalid_raw_file_path(tmp_path):
+    """incremental_save should keep the previous index/content on validation failure."""
+    store = IndexStore(base_path=str(tmp_path))
+
+    original = Symbol(
+        id="main.py::foo#function",
+        file="main.py",
+        name="foo",
+        qualified_name="foo",
+        kind="function",
+        language="python",
+        signature="def foo():",
+        byte_offset=0,
+        byte_length=len("def foo():\n    return 1\n".encode("utf-8")),
+    )
+    store.save_index(
+        owner="demo",
+        name="repo",
+        source_files=["main.py"],
+        symbols=[original],
+        raw_files={"main.py": "def foo():\n    return 1\n"},
+        languages={"python": 1},
+    )
+
+    replacement = Symbol(
+        id="main.py::bar#function",
+        file="main.py",
+        name="bar",
+        qualified_name="bar",
+        kind="function",
+        language="python",
+        signature="def bar():",
+        byte_offset=0,
+        byte_length=10,
+    )
+
+    with pytest.raises(ValueError, match="Unsafe file path"):
+        store.incremental_save(
+            owner="demo",
+            name="repo",
+            changed_files=["main.py"],
+            new_files=[],
+            deleted_files=[],
+            new_symbols=[replacement],
+            raw_files={"../escape.py": "def nope():\n    pass\n"},
+            languages={},
+        )
+
+    loaded = store.load_index("demo", "repo")
+    assert loaded is not None
+    assert loaded.symbols[0]["name"] == "foo"
+    source = store.get_symbol_content("demo", "repo", "main.py::foo#function")
+    assert source is not None
+    assert "return 1" in source
+
+
+def test_detect_changes_fast_catches_same_size_edits_with_preserved_mtime(tmp_path):
+    """Same-size rewrites with a restored mtime should still be treated as changed."""
+    store = IndexStore(base_path=str(tmp_path))
+    main_py = tmp_path / "main.py"
+    original = "def foo():\n    return 1\n"
+    updated = "def bar():\n    return 2\n"
+    assert len(original) == len(updated)
+
+    main_py.write_text(original, encoding="utf-8")
+    store.save_index(
+        owner="local",
+        name="proj",
+        source_files=["main.py"],
+        symbols=[
+            Symbol(
+                id="main.py::foo#function",
+                file="main.py",
+                name="foo",
+                qualified_name="foo",
+                kind="function",
+                language="python",
+                signature="def foo():",
+                byte_offset=0,
+                byte_length=len(original.encode("utf-8")),
+            )
+        ],
+        raw_files={"main.py": original},
+        languages={"python": 1},
+        folder_path=tmp_path,
+    )
+
+    original_mtime_ns = main_py.stat().st_mtime_ns
+    time.sleep(0.01)
+    main_py.write_text(updated, encoding="utf-8")
+    os.utime(main_py, ns=(original_mtime_ns, original_mtime_ns))
+
+    changed, added, deleted = store.detect_changes_fast(
+        "local", "proj", tmp_path, [main_py], source_path=None
+    )
+    assert changed == ["main.py"]
+    assert added == []
+    assert deleted == []
 
 
 def test_get_symbol_content_rejects_traversal_symbol_file(tmp_path):

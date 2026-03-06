@@ -76,10 +76,19 @@ class AutoRefresher:
         try:
             with open(self.CONFIG_PATH) as f:
                 cfg = json.load(f)
-            self._cooldown = float(cfg.get("cooldown_secs", 0))
-            for p in cfg.get("paths", []):
-                self._paths.add(os.path.realpath(os.path.expanduser(str(p))))
-            _log.debug("autorefresh: watching %s", ", ".join(self._paths) or "(none)")
+            resolved_paths = {
+                os.path.realpath(os.path.expanduser(str(p)))
+                for p in cfg.get("paths", [])
+            }
+            with self._lock:
+                self._cooldown = float(cfg.get("cooldown_secs", 0))
+                self._paths = resolved_paths
+                self._last_refresh = {
+                    path: last
+                    for path, last in self._last_refresh.items()
+                    if path in resolved_paths
+                }
+            _log.debug("autorefresh: watching %s", ", ".join(resolved_paths) or "(none)")
         except FileNotFoundError:
             pass
         except Exception as e:

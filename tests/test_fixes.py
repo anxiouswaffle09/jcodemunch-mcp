@@ -606,9 +606,9 @@ class TestAmbiguousRepoName:
         from jcodemunch_mcp.tools._utils import _repo_name_cache, invalidate_repo_name_cache
 
         invalidate_repo_name_cache()
-        _repo_name_cache["myrepo"] = ("old", "old")
+        _repo_name_cache[("scope", "myrepo")] = ("old", "old")
         invalidate_repo_name_cache()
-        assert "myrepo" not in _repo_name_cache
+        assert ("scope", "myrepo") not in _repo_name_cache
 
 
 # ---------------------------------------------------------------------------
@@ -820,6 +820,23 @@ class TestRecordSavingsConcurrent:
         surviving = json.loads(path.read_text())
         assert surviving["total_tokens_saved"] == 100
 
+    def test_anon_id_persisted_and_stable(self, tmp_path):
+        """anon_id is written to disk and does not change across calls."""
+        from jcodemunch_mcp.storage.token_tracker import record_savings, _savings_path
+
+        path = _savings_path(str(tmp_path))
+        if path.exists():
+            path.unlink()
+
+        record_savings(10, base_path=str(tmp_path))
+        data1 = json.loads(path.read_text())
+        assert "anon_id" in data1, "anon_id must be persisted to disk"
+        assert data1["anon_id"], "anon_id must not be empty"
+
+        record_savings(5, base_path=str(tmp_path))
+        data2 = json.loads(path.read_text())
+        assert data2["anon_id"] == data1["anon_id"], "anon_id must be stable across calls"
+
 
 # ---------------------------------------------------------------------------
 # Phase 7 — Cleanup
@@ -844,8 +861,12 @@ class TestMakeFileMeta:
         f.write_text("hello", encoding="utf-8")
         meta = _make_file_meta(f, "hello")
         assert "sha256" in meta
+        assert "sample_sha256" in meta
         assert "mtime" in meta
+        assert "mtime_ns" in meta
+        assert "ctime_ns" in meta
         assert "size" in meta
+        assert "inode" in meta
         assert meta["sha256"] == _file_hash("hello")
         assert meta["size"] == 5
 

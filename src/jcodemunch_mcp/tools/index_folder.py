@@ -96,6 +96,7 @@ def discover_local_files(
         "binary": 0,
         "file_limit": 0,
     }
+    visited_dirs: set[str] = set()
 
     # Load .gitignore
     gitignore_spec = _load_gitignore(root)
@@ -122,20 +123,40 @@ def discover_local_files(
     for dirpath, dirnames, filenames in os.walk(str(root), followlinks=follow_symlinks):
         dir_path = Path(dirpath)
         try:
+            real_dir = str(dir_path.resolve())
+        except OSError:
+            dirnames.clear()
+            skip_counts["unreadable"] += 1
+            continue
+        if real_dir in visited_dirs:
+            dirnames.clear()
+            continue
+        visited_dirs.add(real_dir)
+        try:
             dir_rel = dir_path.relative_to(root).as_posix()
         except ValueError:
             dirnames.clear()
             continue
 
         # Prune directories in-place so os.walk won't descend into them
-        dirnames[:] = [
-            d for d in dirnames
-            if not should_skip_file((f"{dir_rel}/{d}/" if dir_rel != "." else f"{d}/").lstrip("./"))
-            and not (gitignore_spec and gitignore_spec.match_file(
-                f"{dir_rel}/{d}/" if dir_rel != "." else f"{d}/"))
-            and not (extra_spec and extra_spec.match_file(
-                f"{dir_rel}/{d}/" if dir_rel != "." else f"{d}/"))
-        ]
+        pruned_dirnames = []
+        for d in dirnames:
+            rel_dir = (f"{dir_rel}/{d}/" if dir_rel != "." else f"{d}/")
+            if should_skip_file(rel_dir.lstrip("./")):
+                continue
+            if gitignore_spec and gitignore_spec.match_file(rel_dir):
+                continue
+            if extra_spec and extra_spec.match_file(rel_dir):
+                continue
+            try:
+                child_real = str((dir_path / d).resolve())
+            except OSError:
+                skip_counts["unreadable"] += 1
+                continue
+            if child_real in visited_dirs:
+                continue
+            pruned_dirnames.append(d)
+        dirnames[:] = pruned_dirnames
 
         for filename in filenames:
             file_path = dir_path / filename
