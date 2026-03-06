@@ -2,7 +2,6 @@
 
 import logging
 import os
-import sys
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Optional
@@ -320,7 +319,9 @@ def index_folder(
 
             incremental_no_symbols: list[str] = []
             for rel_path in files_to_parse:
-                content = current_files[rel_path]
+                content = current_files.get(rel_path)
+                if content is None:
+                    continue  # file disappeared between discover and read
                 # Track file hashes for changed/new files even when symbol extraction yields none.
                 raw_files_subset[rel_path] = content
                 ext = os.path.splitext(rel_path)[1]
@@ -381,7 +382,9 @@ def index_folder(
                 # Update cross-references for changed/new files only
                 incremental_refs: list[dict] = []
                 for rel_path in files_to_parse:
-                    content = current_files[rel_path]
+                    content = current_files.get(rel_path)
+                    if content is None:
+                        continue
                     ext = os.path.splitext(rel_path)[1]
                     language = LANGUAGE_EXTENSIONS.get(ext)
                     if not language:

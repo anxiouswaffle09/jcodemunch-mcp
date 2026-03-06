@@ -2,6 +2,7 @@
 
 import asyncio
 import os
+from types import SimpleNamespace
 from typing import Optional
 from urllib.parse import quote, urlparse
 
@@ -294,9 +295,9 @@ async def index_repo(
         store = IndexStore(base_path=storage_path)
 
         # Incremental path — detect changes via blob SHAs, download only what changed
-        if incremental and store.load_index(owner, repo) is not None:
-            index = store.load_index(owner, repo)
-            stored_hashes: dict = index.file_hashes if index else {}
+        existing_index = store.load_index(owner, repo)
+        if incremental and existing_index is not None:
+            stored_hashes: dict = existing_index.file_hashes
             current_paths = set(source_files)
             stored_paths = set(stored_hashes.keys())
 
@@ -326,15 +327,20 @@ async def index_repo(
             warnings.extend(fetch_warnings)
 
             current_files: dict[str, str] = {p: c for p, c in fetched if c is not None}
+            successfully_fetched = set(current_files.keys())
 
-            files_to_parse = set(changed) | set(new_files)
+            # Exclude files whose download failed so they are retried next incremental run.
+            # - changed files that failed: keep old symbols + content, retry next run
+            # - new files that failed: don't add to index at all, retry next run
+            actual_changed = [p for p in changed if p in successfully_fetched]
+            actual_new = [p for p in new_files if p in successfully_fetched]
+
+            files_to_parse = successfully_fetched & files_to_download
             new_symbols = []
             raw_files_subset: dict[str, str] = {}
 
             for path in files_to_parse:
-                content = current_files.get(path)
-                if content is None:
-                    continue  # fetch failed
+                content = current_files[path]
                 # Track file content for changed/new files even when symbol extraction yields none.
                 raw_files_subset[path] = content
                 _, ext = os.path.splitext(path)
@@ -350,43 +356,80 @@ async def index_repo(
 
             new_symbols = summarize_symbols(new_symbols, use_ai=use_ai_summaries)
 
-            # Update stored file_hashes with current blob SHAs (including unchanged files)
+            # Update stored blob SHAs:
+            # - Unchanged files (not in files_to_download): update to current blob SHA
+            # - Successfully fetched files: update to current blob SHA
+            # - Failed downloads: keep old hash so next incremental run retries them
             updated_hashes = dict(stored_hashes)
-            updated_hashes.update(blob_shas)
+            for p, sha in blob_shas.items():
+                if p not in files_to_download or p in successfully_fetched:
+                    updated_hashes[p] = sha
+                # else: fetch failed — preserve old hash so next run detects as changed
             for p in deleted:
                 updated_hashes.pop(p, None)
+            for p in new_files:
+                if p not in successfully_fetched:
+                    updated_hashes.pop(p, None)  # new + failed → not in index
 
             updated = store.incremental_save(
                 owner=owner, name=repo,
-                changed_files=changed, new_files=new_files, deleted_files=deleted,
+                changed_files=actual_changed, new_files=actual_new, deleted_files=deleted,
                 new_symbols=new_symbols, raw_files=raw_files_subset,
                 languages={},
                 file_hashes_override=updated_hashes,
             )
 
-            # Compute refs for downloaded files and merge (handles missing refs.json too)
-            incremental_refs = []
-            for path in files_to_parse:
-                content = current_files.get(path)
-                if content is None:
-                    continue  # fetch failed
-                _, ext = os.path.splitext(path)
-                language = LANGUAGE_EXTENSIONS.get(ext)
-                if not language:
-                    continue
-                try:
-                    file_symbols = [s for s in new_symbols if s.file == path]
-                    incremental_refs.extend(extract_refs(content, path, language, file_symbols))
-                except Exception:
-                    warnings.append(f"Failed to extract refs for {path}")
-            removed = set(changed) | set(deleted)
-            store.merge_refs(owner, repo, incremental_refs, removed)
+            needs_full_backfill = store.load_refs(owner, repo) is None
+            if needs_full_backfill:
+                # refs.json missing — rebuild refs for ALL current source files.
+                # Download unchanged files too (for refs extraction only, content not re-stored).
+                unchanged = [p for p in source_files if p not in files_to_download]
+                prev_warn_count = len(fetch_warnings)
+                extra_fetched = await asyncio.gather(
+                    *[fetch_with_limit(p) for p in unchanged]
+                )
+                warnings.extend(fetch_warnings[prev_warn_count:])
+                backfill_content = dict(current_files)
+                backfill_content.update({p: c for p, c in extra_fetched if c is not None})
+                all_sym_dicts = updated.symbols if updated else []
+                all_refs = []
+                for path, content in backfill_content.items():
+                    _, ext = os.path.splitext(path)
+                    language = LANGUAGE_EXTENSIONS.get(ext)
+                    if not language:
+                        continue
+                    try:
+                        proxies = [
+                            SimpleNamespace(line=s["line"], end_line=s["end_line"],
+                                            id=s["id"], file=s["file"])
+                            for s in all_sym_dicts if s.get("file") == path
+                        ]
+                        all_refs.extend(extract_refs(content, path, language, proxies))
+                    except Exception:
+                        pass
+                store.save_refs(owner, repo, all_refs)
+            else:
+                # Normal incremental: merge refs for changed/new files only
+                incremental_refs = []
+                for path in files_to_parse:
+                    content = current_files[path]
+                    _, ext = os.path.splitext(path)
+                    language = LANGUAGE_EXTENSIONS.get(ext)
+                    if not language:
+                        continue
+                    try:
+                        file_symbols = [s for s in new_symbols if s.file == path]
+                        incremental_refs.extend(extract_refs(content, path, language, file_symbols))
+                    except Exception:
+                        warnings.append(f"Failed to extract refs for {path}")
+                removed = set(actual_changed) | set(deleted)
+                store.merge_refs(owner, repo, incremental_refs, removed)
 
             result = {
                 "success": True,
                 "repo": f"{owner}/{repo}",
                 "incremental": True,
-                "changed": len(changed), "new": len(new_files), "deleted": len(deleted),
+                "changed": len(actual_changed), "new": len(actual_new), "deleted": len(deleted),
                 "symbol_count": len(updated.symbols) if updated else 0,
                 "indexed_at": updated.indexed_at if updated else "",
                 "ref_count": len(store.load_refs(owner, repo) or []),

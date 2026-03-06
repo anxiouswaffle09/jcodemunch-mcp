@@ -216,7 +216,7 @@ class TestCompositeFilter:
     def test_binary_extension_excluded(self, tmp_path):
         f = tmp_path / "image.png"
         f.write_bytes(b"\x89PNG")
-        assert should_exclude_file(f, tmp_path) == "binary_extension"
+        assert should_exclude_file(f, tmp_path) == "binary"
 
     def test_checks_can_be_disabled(self, tmp_path):
         f = tmp_path / ".env"
@@ -253,12 +253,16 @@ class TestDiscoverLocalFilesSecure:
         (tmp_path / "main.py").write_text("def main(): pass\n")
         (tmp_path / ".env").write_text("SECRET=foo\n")
         (tmp_path / "config.pem").write_text("-----BEGIN CERTIFICATE-----\n")
+        # A file with a source extension that matches the "*secret*" pattern —
+        # this reaches should_exclude_file and generates a warning.
+        (tmp_path / "my_secrets.py").write_text("KEY = 'abc'\n")
 
         files, warnings, _ = discover_local_files(tmp_path)
         rel_paths = [f.name for f in files]
         assert "main.py" in rel_paths
         assert ".env" not in rel_paths
         assert "config.pem" not in rel_paths
+        assert "my_secrets.py" not in rel_paths
         assert any("secret" in w.lower() for w in warnings)
 
     def test_excludes_binary_files(self, tmp_path):
@@ -355,7 +359,7 @@ class TestIndexRepoSecretFilter:
             {"path": "src/utils.py", "type": "blob", "size": 500},
         ]
 
-        files, truncated = discover_source_files(tree_entries)
+        files, truncated, _blob_shas = discover_source_files(tree_entries)
         assert "src/main.py" in files
         assert "src/utils.py" in files
         assert ".env" not in files

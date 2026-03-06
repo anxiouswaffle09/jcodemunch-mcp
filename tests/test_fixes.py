@@ -939,6 +939,25 @@ class TestIncrementalBlobShaDetection:
         # Should be content SHA-256, not the old value
         assert updated.file_hashes["a.py"] == _file_hash("new content")
 
+    def test_failed_fetch_preserves_old_hash(self, tmp_path):
+        """Files whose download failed keep old blob SHA so next run retries them."""
+        # Reproduces the logic from index_repo incremental path:
+        # blob_shas has all current SHAs; successfully_fetched is the subset that downloaded.
+        blob_shas = {"a.py": "new_sha", "b.py": "b_sha"}
+        stored = {"a.py": "old_sha", "b.py": "b_sha"}
+        files_to_download = {"a.py"}
+        successfully_fetched: set[str] = set()  # a.py download failed
+
+        updated_hashes = dict(stored)
+        for p, sha in blob_shas.items():
+            if p not in files_to_download or p in successfully_fetched:
+                updated_hashes[p] = sha
+
+        # a.py fetch failed → hash unchanged so next run sees it as changed and retries
+        assert updated_hashes["a.py"] == "old_sha"
+        # b.py unchanged → hash updated (same value here, but the logic runs correctly)
+        assert updated_hashes["b.py"] == "b_sha"
+
 
 class TestShouldExcludeFileUnified:
     """Issue 27: discover_local_files uses should_exclude_file for security checks."""

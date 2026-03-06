@@ -205,8 +205,13 @@ async def test_incremental_backfill_repo_rebuilds_all_refs(tmp_path, monkeypatch
     updated_contents = {**contents, "helper.py": "def helper():\n    return 42\n"}
 
     async def fake_fetch_repo_tree(owner, repo, token=None):
+        import hashlib
         active = contents if version["v"] == 1 else updated_contents
-        return [{"path": p, "type": "blob", "size": len(v)} for p, v in active.items()]
+        return [
+            {"path": p, "type": "blob", "size": len(v),
+             "sha": hashlib.sha1(v.encode()).hexdigest()}
+            for p, v in active.items()
+        ]
 
     async def fake_fetch_gitignore(owner, repo, token=None):
         return None

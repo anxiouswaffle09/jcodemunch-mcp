@@ -44,7 +44,7 @@ def test_discover_source_files():
         {"path": "include/engine.hpp", "type": "blob", "size": 350},
     ]
     
-    files, truncated = discover_source_files(tree_entries, gitignore_content=None)
+    files, truncated, _blob_shas = discover_source_files(tree_entries, gitignore_content=None)
     
     assert "src/main.py" in files
     assert "src/utils.py" in files
@@ -62,7 +62,7 @@ def test_discover_source_files_respects_max():
         for i in range(1000)
     ]
     
-    files, truncated = discover_source_files(tree_entries, max_files=100)
+    files, truncated, _blob_shas = discover_source_files(tree_entries, max_files=100)
     assert len(files) == 100
     assert truncated is True
 
@@ -77,7 +77,7 @@ def test_discover_source_files_prioritizes_src():
         for i in range(300)
     ]
     
-    files, truncated = discover_source_files(tree_entries, max_files=100)
+    files, truncated, _blob_shas = discover_source_files(tree_entries, max_files=100)
     # Most files should be from src/
     src_count = sum(1 for f in files if f.startswith("src/"))
     assert src_count > 50  # Majority should be src/
@@ -92,7 +92,7 @@ def test_discover_source_files_uses_env_override():
     ]
 
     with patch.dict("os.environ", {MAX_INDEX_FILES_ENV_VAR: "7"}, clear=False):
-        files, truncated = discover_source_files(tree_entries)
+        files, truncated, _blob_shas = discover_source_files(tree_entries)
 
     assert len(files) == 7
     assert truncated is True
@@ -106,7 +106,7 @@ def test_discover_source_files_explicit_max_overrides_env():
     ]
 
     with patch.dict("os.environ", {MAX_INDEX_FILES_ENV_VAR: "7"}, clear=False):
-        files, truncated = discover_source_files(tree_entries, max_files=5)
+        files, truncated, _blob_shas = discover_source_files(tree_entries, max_files=5)
 
     assert len(files) == 5
     assert truncated is True
@@ -119,7 +119,7 @@ def test_discover_source_files_exact_limit_is_not_truncated():
         for i in range(5)
     ]
 
-    files, truncated = discover_source_files(tree_entries, max_files=5)
+    files, truncated, _blob_shas = discover_source_files(tree_entries, max_files=5)
 
     assert len(files) == 5
     assert truncated is False
