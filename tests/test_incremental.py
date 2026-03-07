@@ -225,3 +225,38 @@ class TestIncrementalIndexFolder:
         assert inc3["changed"] == 0
         assert inc3["new"] == 0
         assert inc3["deleted"] == 0
+
+    def test_incremental_rebuilds_refs_when_refs_json_missing(self, tmp_path):
+        """If refs.json is deleted, the next incremental run backfills it from all current files."""
+        src = tmp_path / "src"
+        src.mkdir()
+        store_path = tmp_path / "store"
+
+        _write_py(src, "a.py", "def foo():\n    pass\n\ndef bar():\n    foo()\n")
+        _write_py(src, "b.py", "def baz():\n    pass\n")
+
+        # Full index
+        result = index_folder(str(src), use_ai_summaries=False, storage_path=str(store_path))
+        assert result["success"] is True
+
+        # Delete refs.json to simulate a missing refs file
+        from jcodemunch_mcp.storage import IndexStore
+        store = IndexStore(base_path=str(store_path))
+        refs_path = store._refs_path("local", src.name)
+        refs_path.unlink()
+        assert store.load_refs("local", src.name) is None
+
+        # Modify one file to trigger an actual incremental run (not early-exit)
+        _write_py(src, "a.py", "def foo():\n    return 1\n\ndef bar():\n    foo()\n")
+
+        result2 = index_folder(
+            str(src), use_ai_summaries=False, storage_path=str(store_path), incremental=True
+        )
+        assert result2["success"] is True
+        assert result2["incremental"] is True
+        assert result2["changed"] == 1
+
+        # refs.json must have been rebuilt
+        rebuilt = store.load_refs("local", src.name)
+        assert rebuilt is not None
+        assert len(rebuilt) > 0
