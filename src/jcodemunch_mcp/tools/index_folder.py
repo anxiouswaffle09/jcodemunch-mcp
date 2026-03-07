@@ -478,7 +478,7 @@ def index_folder(
         # Save index — let save_index build mtime+size metadata from disk
         from ..storage.index_store import _get_git_head as _ggh
         git_head_full = _ggh(folder_path) or ""
-        store.save_index(
+        saved_index = store.save_index(
             owner=owner,
             name=repo_name,
             source_files=sorted(current_files),
@@ -509,7 +509,7 @@ def index_folder(
             "success": True,
             "repo": f"{owner}/{repo_name}",
             "folder_path": str(folder_path),
-            "indexed_at": store.load_index(owner, repo_name).indexed_at,
+            "indexed_at": saved_index.indexed_at,
             "file_count": len(parsed_files),
             "symbol_count": len(all_symbols),
             "ref_count": len(all_refs),
