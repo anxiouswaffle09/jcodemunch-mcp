@@ -61,8 +61,8 @@ def get_symbol(
     context_before = ""
     context_after = ""
     if context_lines > 0 and source:
-        file_path = store._content_dir(owner, name) / symbol["file"]
-        if file_path.exists():
+        file_path = store._safe_content_path(store._content_dir(owner, name), symbol["file"])
+        if file_path and file_path.exists():
             try:
                 all_lines = file_path.read_text(encoding="utf-8", errors="replace").split("\n")
                 start_line = symbol["line"] - 1  # 0-indexed

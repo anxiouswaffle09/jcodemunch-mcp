@@ -118,19 +118,19 @@ class AutoRefresher:
                 return False
             self._paths.add(resolved)
 
-        # Persist to config atomically
-        cfg_path = Path(self.CONFIG_PATH)
-        cfg_path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = cfg_path.with_suffix(".json.tmp")
-        try:
-            existing = json.loads(cfg_path.read_text()) if cfg_path.exists() else {}
-        except Exception:
-            existing = {}
-        paths_set = set(existing.get("paths", [])) | {resolved}
-        existing["paths"] = sorted(paths_set)
-        tmp.write_text(json.dumps(existing, indent=2))
-        tmp.replace(cfg_path)
-        _log.debug("autorefresh: registered and persisted %s", resolved)
+            # Persist to config atomically, inside the lock to prevent concurrent
+            # register_path calls from racing on the file read-modify-write.
+            cfg_path = Path(self.CONFIG_PATH)
+            cfg_path.parent.mkdir(parents=True, exist_ok=True)
+            tmp = cfg_path.with_suffix(".json.tmp")
+            try:
+                existing = json.loads(cfg_path.read_text()) if cfg_path.exists() else {}
+            except Exception:
+                existing = {}
+            existing["paths"] = sorted(self._paths)
+            tmp.write_text(json.dumps(existing, indent=2))
+            tmp.replace(cfg_path)
+            _log.debug("autorefresh: registered and persisted %s", resolved)
         return True
 
     def remove_path(self, path: str) -> bool:
@@ -140,18 +140,20 @@ class AutoRefresher:
             if resolved not in self._paths:
                 return False
             self._paths.discard(resolved)
-        cfg_path = Path(self.CONFIG_PATH)
-        cfg_path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = cfg_path.with_suffix(".json.tmp")
-        try:
-            existing = json.loads(cfg_path.read_text()) if cfg_path.exists() else {}
-        except Exception:
-            existing = {}
-        paths_set = set(existing.get("paths", [])) - {resolved}
-        existing["paths"] = sorted(paths_set)
-        tmp.write_text(json.dumps(existing, indent=2))
-        tmp.replace(cfg_path)
-        _log.debug("autorefresh: removed and persisted %s", resolved)
+
+            # Persist to config atomically, inside the lock to prevent concurrent
+            # remove_path calls from racing on the file read-modify-write.
+            cfg_path = Path(self.CONFIG_PATH)
+            cfg_path.parent.mkdir(parents=True, exist_ok=True)
+            tmp = cfg_path.with_suffix(".json.tmp")
+            try:
+                existing = json.loads(cfg_path.read_text()) if cfg_path.exists() else {}
+            except Exception:
+                existing = {}
+            existing["paths"] = sorted(self._paths)
+            tmp.write_text(json.dumps(existing, indent=2))
+            tmp.replace(cfg_path)
+            _log.debug("autorefresh: removed and persisted %s", resolved)
         return True
 
     def get_watched_paths(self) -> list[str]:
@@ -209,7 +211,7 @@ class AutoRefresher:
 
 auto_refresher = AutoRefresher()
 
-if os.environ.get("JCODEMUNCH_SHARE_SAVINGS", "1") != "0":
+if os.environ.get("JCODEMUNCH_SHARE_SAVINGS", "0") == "1":
     _log.info(
         "jcodemunch: anonymous token-savings telemetry is ON. "
         "Set JCODEMUNCH_SHARE_SAVINGS=0 to disable. "

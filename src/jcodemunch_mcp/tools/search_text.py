@@ -67,7 +67,9 @@ def search_text(
     response_warning: Optional[str] = None
 
     MAX_SEARCH_BYTES = 50 * 1024 * 1024  # 50MB guard
+    MAX_MATCH_ACCUMULATION = 50_000
     bytes_read = 0
+    total_hits = 0
 
     for file_path in files:
         if bytes_read > MAX_SEARCH_BYTES:
@@ -88,13 +90,19 @@ def search_text(
         for line_num, line in enumerate(lines, 1):
             haystack = line if exact else line.lower()
             if query_match in haystack:
-                all_matches.append({
-                    "file": file_path,
-                    "line": line_num,
-                    "text": line.rstrip()[:200],
-                })
+                total_hits += 1
+                if total_hits <= MAX_MATCH_ACCUMULATION:
+                    all_matches.append({
+                        "file": file_path,
+                        "line": line_num,
+                        "text": line.rstrip()[:200],
+                    })
 
-    total_hits = len(all_matches)
+    if total_hits > MAX_MATCH_ACCUMULATION and response_warning is None:
+        response_warning = (
+            f"Match cap reached — stored first {MAX_MATCH_ACCUMULATION:,} of "
+            f"{total_hits:,} total matches. Use file_pattern or a more specific query."
+        )
 
     # Paginate / cap
     if exhaustive:
