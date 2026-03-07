@@ -427,3 +427,32 @@ def test_incremental_save_recomputes_languages_from_merged_symbols(tmp_path):
 
     assert updated is not None
     assert updated.languages == {"python": 1, "cpp": 1}
+
+
+def test_get_ref_count_reads_stored_field(tmp_path):
+    """get_ref_count returns the value stored in ref_count field."""
+    store = IndexStore(base_path=str(tmp_path))
+    refs = [
+        {"callee": "foo", "ref_type": "call", "caller_file": "a.py",
+         "caller_line": i, "caller_symbol_id": None, "is_test": False}
+        for i in range(7)
+    ]
+    store.save_refs("owner", "repo", refs)
+    assert store.get_ref_count("owner", "repo") == 7
+
+
+def test_get_ref_count_fallback_for_old_format(tmp_path):
+    """Falls back to len(refs) when ref_count field is absent (old format)."""
+    store = IndexStore(base_path=str(tmp_path))
+    refs_path = tmp_path / "owner-repo-refs.json"
+    refs_path.write_text(
+        json.dumps({"repo": "owner/repo", "refs": [{}, {}, {}]}),
+        encoding="utf-8",
+    )
+    assert store.get_ref_count("owner", "repo") == 3
+
+
+def test_get_ref_count_returns_zero_when_file_missing(tmp_path):
+    """Returns 0 when no refs file exists yet."""
+    store = IndexStore(base_path=str(tmp_path))
+    assert store.get_ref_count("owner", "repo") == 0

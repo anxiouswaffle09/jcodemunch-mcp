@@ -902,6 +902,18 @@ class IndexStore:
         except Exception:
             return None
 
+    def get_ref_count(self, owner: str, name: str) -> int:
+        """Return stored ref count without loading the full refs list."""
+        refs_path = self._refs_path(owner, name)
+        if not refs_path.exists():
+            return 0
+        try:
+            with open(refs_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            return data.get("ref_count", len(data.get("refs", [])))
+        except Exception:
+            return 0
+
     def merge_refs(self, owner: str, name: str, new_refs: list[dict], removed_files: set[str]) -> None:
         """Merge new refs into existing table, removing stale entries for changed/deleted files.
 
