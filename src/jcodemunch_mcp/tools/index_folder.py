@@ -453,7 +453,9 @@ def index_folder(
                         incremental_refs.extend(extract_refs(content, rel_path, language, file_symbols))
                     except Exception:
                         pass
-                removed = set(changed) | set(deleted)
+                # Use actual_changed (not changed) so refs for unread files are
+                # also preserved — consistent with symbol preservation above.
+                removed = set(actual_changed) | set(deleted)
                 store.merge_refs(owner, repo_name, incremental_refs, removed)
 
             # Incremental result deliberately omits file_count, languages, and files
