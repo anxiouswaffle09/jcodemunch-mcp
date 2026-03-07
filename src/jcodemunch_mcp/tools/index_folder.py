@@ -381,6 +381,8 @@ def index_folder(
             # Check before incremental_save — safe either way since incremental_save
             # never reads or writes the refs file. The check must happen before we
             # save so we know whether to run a full backfill or a partial merge.
+            # Note: index_repo.py checks this after incremental_save — both positions
+            # are equivalent; the ordering difference is cosmetic, not a bug.
             needs_full_backfill = store.load_refs(owner, repo_name) is None
             updated = store.incremental_save(
                 owner=owner, name=repo_name,
@@ -404,21 +406,21 @@ def index_folder(
                 all_refs: list[dict] = []
                 for file_path in source_files:
                     if not validate_path(folder_path, file_path):
-                        continue
+                        continue  # discovery already filters path-traversal; unreachable in practice
                     try:
                         rel_path = file_path.relative_to(folder_path).as_posix()
                     except ValueError:
-                        continue
+                        continue  # same — discovery guarantees all source_files are under folder_path
                     ext = os.path.splitext(rel_path)[1]
                     language = LANGUAGE_EXTENSIONS.get(ext)
                     if not language:
-                        continue
+                        continue  # discovery's extension filter already covers this; defensive only
                     content = parsed_content.get(rel_path)
                     if content is None:
                         try:
                             content = file_path.read_text(encoding="utf-8", errors="replace")
                         except Exception:
-                            continue
+                            continue  # file disappeared or became unreadable between parse and backfill; skip silently
                     try:
                         # The four dict keys (line/end_line/id/file) are always written
                         # by _symbol_to_dict — no KeyError risk. The try/except here

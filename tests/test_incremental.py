@@ -316,7 +316,11 @@ class TestIncrementalIndexFolder:
         assert result2["incremental"] is True
         assert result2["changed"] == 1
 
-        # refs.json must have been rebuilt
+        # refs.json must have been rebuilt. len > 0 is sufficient here: the backfill
+        # loop iterates all source_files (not just changed ones), so if any refs exist
+        # at all it confirms the full-file sweep ran. A partial-backfill bug would
+        # still produce refs (from the changed file), so this is a smoke check rather
+        # than an exhaustive coverage assertion — acceptable for a safety-net test.
         rebuilt = store.load_refs("local", src.name)
         assert rebuilt is not None
         assert len(rebuilt) > 0

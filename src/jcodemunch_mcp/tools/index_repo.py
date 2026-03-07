@@ -384,6 +384,8 @@ async def index_repo(
 
             # Checked after incremental_save — safe because incremental_save never
             # reads or writes the refs file, so the result is the same either side.
+            # Note: index_folder.py checks this before incremental_save — both positions
+            # are equivalent; the ordering difference is cosmetic, not a bug.
             needs_full_backfill = store.load_refs(owner, repo) is None
             if needs_full_backfill:
                 # refs.json missing — rebuild refs for ALL current source files.
