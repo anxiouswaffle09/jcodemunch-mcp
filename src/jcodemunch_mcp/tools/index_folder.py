@@ -426,7 +426,7 @@ def index_folder(
                 "changed": len(changed), "new": len(new), "deleted": len(deleted),
                 "symbol_count": len(updated.symbols) if updated else 0,
                 "indexed_at": updated.indexed_at if updated else "",
-                "ref_count": len(store.load_refs(owner, repo_name) or []),
+                "ref_count": store.get_ref_count(owner, repo_name),
                 "discovery_skip_counts": skip_counts,
                 "no_symbols_count": len(incremental_no_symbols),
                 "no_symbols_files": incremental_no_symbols[:50],

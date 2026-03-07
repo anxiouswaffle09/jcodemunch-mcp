@@ -432,7 +432,7 @@ async def index_repo(
                 "changed": len(actual_changed), "new": len(actual_new), "deleted": len(deleted),
                 "symbol_count": len(updated.symbols) if updated else 0,
                 "indexed_at": updated.indexed_at if updated else "",
-                "ref_count": len(store.load_refs(owner, repo) or []),
+                "ref_count": store.get_ref_count(owner, repo),
             }
             if warnings:
                 result["warnings"] = warnings
