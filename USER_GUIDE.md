@@ -245,7 +245,7 @@ index_repo: { "url": "owner/repo" }
 | `index_repo`         | Index GitHub repository            | `url`, `use_ai_summaries`                                                           |
 | `index_folder`       | Index local folder                 | `path`, `extra_ignore_patterns`, `follow_symlinks`                                  |
 | `list_repos`         | List all indexed repositories      | —                                                                                   |
-| `get_file_tree`      | Browse file structure              | `repo`, `path_prefix`                                                               |
+| `get_file_tree`      | Browse file structure              | `repo`, `path_prefix`, `show_empty`                                                 |
 | `get_file_outline`   | Symbols in a file                  | `repo`, `file_path`                                                                 |
 | `get_symbol`         | Full source of one symbol          | `repo`, `symbol_id`, `verify`, `context_lines`                                      |
 | `get_symbols`        | Batch retrieve symbols             | `repo`, `symbol_ids`                                                                |

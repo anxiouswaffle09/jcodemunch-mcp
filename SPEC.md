@@ -65,11 +65,12 @@ No input required. Returns all indexed repositories with symbol counts, file cou
 ```json
 {
   "repo": "owner/repo",
-  "path_prefix": "src/"
+  "path_prefix": "src/",
+  "show_empty": false
 }
 ```
 
-Returns a nested directory tree with per-file language and symbol count annotations.
+Returns compact indented text with per-file symbol counts in parentheses, e.g. `server.py (16)`. Language labels appear only in mixed-language repos. Files sorted by symbol count (most important first). Zero-symbol files hidden by default; set `show_empty: true` to include them.
 
 #### `get_file_outline` — Get symbols in a file
 
@@ -315,7 +316,7 @@ All tools return a `_meta` object with timing, context, and token savings:
 - **`tokens_saved`**: Tokens saved by this specific call (raw file bytes vs response bytes, divided by 4)
 - **`total_tokens_saved`**: Cumulative tokens saved across all tool calls, persisted to `~/.code-index/_savings.json`
 
-Present on: `get_file_outline`, `get_symbol`, `get_symbols`, `get_repo_outline`, `search_symbols`.
+Present on: `get_file_tree`, `get_file_outline`, `get_symbol`, `get_symbols`, `get_repo_outline`, `search_symbols`, `search_text`.
 
 ---
 

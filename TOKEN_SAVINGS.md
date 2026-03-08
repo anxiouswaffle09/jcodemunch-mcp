@@ -66,6 +66,6 @@ Every tool response includes real-time savings data in the `_meta` field:
 - **`tokens_saved`**: Tokens saved by the current call (raw file bytes vs response bytes ÷ 4)
 - **`total_tokens_saved`**: Cumulative total across all calls, persisted to `~/.code-index/_savings.json`
 
-No extra API calls or file reads — computed using fast `os.stat` only.
+No extra API calls or file reads — computed from `os.stat` (raw file size) and actual serialized response size.
 
 ---
