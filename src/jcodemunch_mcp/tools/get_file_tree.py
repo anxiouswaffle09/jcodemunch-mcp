@@ -11,18 +11,19 @@ from ._utils import resolve_repo
 def get_file_tree(
     repo: str,
     path_prefix: str = "",
-    include_summaries: bool = False,
+    show_empty: bool = False,
     storage_path: Optional[str] = None
 ) -> dict:
-    """Get repository file tree, optionally filtered by path prefix.
+    """Get repository file tree as compact indented text.
 
     Args:
         repo: Repository identifier (owner/repo or just repo name)
         path_prefix: Optional path prefix to filter
+        show_empty: Show files with zero symbols (default False)
         storage_path: Custom storage path
 
     Returns:
-        Dict with hierarchical tree structure
+        Dict with tree (str), repo, path_prefix, and _meta envelope.
     """
     start = time.perf_counter()
 
@@ -30,138 +31,152 @@ def get_file_tree(
         owner, name = resolve_repo(repo, storage_path)
     except ValueError as e:
         return {"error": str(e)}
-    
-    # Load index
+
     store = IndexStore(base_path=storage_path)
     index = store.load_index(owner, name)
-    
+
     if not index:
         return {"error": f"Repository not indexed: {owner}/{name}"}
-    
+
     # Filter files by prefix
     files = [f for f in index.source_files if f.startswith(path_prefix)]
-    
+
     if not files:
         return {
             "repo": f"{owner}/{name}",
             "path_prefix": path_prefix,
-            "tree": []
+            "tree": ""
         }
-    
-    # Build tree structure
-    tree = _build_tree(files, index, path_prefix, include_summaries)
+
+    # Precompute symbol counts and languages per file
+    symbol_counts: dict[str, int] = {}
+    file_languages: dict[str, str] = {}
+    for sym in index.symbols:
+        fp = sym.get("file", "")
+        symbol_counts[fp] = symbol_counts.get(fp, 0) + 1
+        if fp not in file_languages:
+            lang = sym.get("language", "")
+            if lang:
+                file_languages[fp] = lang
+
+    # Build tree text
+    tree_text = _render_tree(files, path_prefix, symbol_counts, file_languages, show_empty)
 
     elapsed = (time.perf_counter() - start) * 1000
 
-    # Token savings: sum of raw file sizes vs compact tree response
-    content_dir = store._content_dir(owner, name)
-    raw_bytes = 0
-    for f in files:
-        try:
-            raw_bytes += os.path.getsize(content_dir / f)
-        except OSError:
-            pass
-    response_bytes = len(str(tree).encode())
+    # Token savings: path listing (Glob equivalent) vs compact tree response
+    raw_bytes = sum(len(f.encode()) + 1 for f in files)  # +1 for newline per path
+    response_bytes = len(tree_text.encode())
     tokens_saved = estimate_savings(raw_bytes, response_bytes)
     total_saved = record_savings(tokens_saved)
 
-    result: dict = {
+    file_count = len(files)
+    if not show_empty:
+        file_count = sum(1 for f in files if symbol_counts.get(f, 0) > 0)
+
+    return {
         "repo": f"{owner}/{name}",
         "path_prefix": path_prefix,
-        "tree": tree,
+        "tree": tree_text,
         "_meta": {
             "timing_ms": round(elapsed, 1),
-            "file_count": len(files),
+            "file_count": file_count,
             "tokens_saved": tokens_saved,
             "total_tokens_saved": total_saved,
             **cost_avoided(tokens_saved, total_saved),
         },
     }
 
-    if include_summaries and not any(
-        node.get("summary") for node in _flatten_tree_nodes(tree)
-    ):
-        result["warning"] = (
-            "include_summaries=True but no file summaries are available. "
-            "Re-index with a recent version to generate them."
-        )
 
-    return result
+def _majority_language(file_languages: dict[str, str]) -> str:
+    """Return the most common language, or '' if mixed/empty."""
+    if not file_languages:
+        return ""
+    counts: dict[str, int] = {}
+    for lang in file_languages.values():
+        counts[lang] = counts.get(lang, 0) + 1
+    majority = max(counts, key=counts.get)
+    # Only suppress if > 80% of files share the same language
+    if counts[majority] / len(file_languages) > 0.8:
+        return majority
+    return ""
 
 
-def _build_tree(files: list[str], index, path_prefix: str, include_summaries: bool = False) -> list[dict]:
-    """Build nested tree from flat file list."""
-    # Group files by directory
-    root = {}
-    file_languages: dict[str, str] = {}
-    for sym in index.symbols:
-        file_path = sym.get("file")
-        language = sym.get("language")
-        if file_path and language and file_path not in file_languages:
-            file_languages[file_path] = language
-    
+def _render_tree(
+    files: list[str],
+    path_prefix: str,
+    symbol_counts: dict[str, int],
+    file_languages: dict[str, str],
+    show_empty: bool,
+) -> str:
+    """Render file list as compact indented text tree.
+
+    Files are sorted by symbol count descending within each directory.
+    Zero-symbol files are hidden unless show_empty is True.
+    Language is shown per file only when the repo has mixed languages.
+    """
+    # Determine if language labels are needed (skip for monolingual repos)
+    majority = _majority_language(file_languages)
+
+    root: dict = {}
+
     for file_path in files:
-        # Remove prefix for relative path
+        count = symbol_counts.get(file_path, 0)
+        if not show_empty and count == 0:
+            continue
+
         rel_path = file_path[len(path_prefix):].lstrip("/")
         parts = rel_path.split("/")
-        
-        # Navigate/create tree
+
+        # Get language (only needed for mixed-language repos)
+        lang = ""
+        if not majority:
+            lang = file_languages.get(file_path, "")
+            if not lang:
+                _, ext = os.path.splitext(file_path)
+                from ..parser import LANGUAGE_EXTENSIONS
+                lang = LANGUAGE_EXTENSIONS.get(ext, "")
+
+        # Navigate to parent dir
         current = root
-        for i, part in enumerate(parts):
-            is_last = i == len(parts) - 1
-            
-            if is_last:
-                # File node
-                # Count symbols for this file
-                symbol_count = sum(1 for s in index.symbols if s.get("file") == file_path)
-                
-                # Get language
-                lang = file_languages.get(file_path, "")
-                if not lang:
-                    _, ext = os.path.splitext(file_path)
-                    from ..parser import LANGUAGE_EXTENSIONS
-                    lang = LANGUAGE_EXTENSIONS.get(ext, "")
-                
-                node = {
-                    "path": file_path,
-                    "type": "file",
-                    "language": lang,
-                    "symbol_count": symbol_count
-                }
-                if include_summaries:
-                    node["summary"] = index.file_summaries.get(file_path, "")
-                current[part] = node
-            else:
-                # Directory node
-                if part not in current:
-                    current[part] = {"type": "dir", "children": {}}
-                current = current[part]["children"]
-    
-    # Convert to list format
-    return _dict_to_list(root)
+        for part in parts[:-1]:
+            if part not in current:
+                current[part] = {}
+            current = current[part]
+
+        # Store file entry as tuple: (full_path, count, lang)
+        filename = parts[-1]
+        current[filename] = (file_path, count, lang)
+
+    lines: list[str] = []
+    _render_node(root, lines, indent=0)
+    return "\n".join(lines)
 
 
-def _flatten_tree_nodes(tree: list[dict]) -> list[dict]:
-    """Yield all file nodes from a nested tree."""
-    for node in tree:
-        if node.get("type") == "file":
-            yield node
+def _render_node(node: dict, lines: list[str], indent: int) -> None:
+    """Recursively render tree nodes to text lines."""
+    prefix = "  " * indent
+
+    # Separate dirs and files
+    dirs = []
+    file_entries = []
+    for key, value in node.items():
+        if isinstance(value, tuple):
+            file_entries.append((key, value))
         else:
-            yield from _flatten_tree_nodes(node.get("children", []))
+            dirs.append((key, value))
 
+    # Sort dirs alphabetically
+    dirs.sort(key=lambda x: x[0])
 
-def _dict_to_list(node_dict: dict) -> list[dict]:
-    """Convert tree dict to list format."""
-    result = []
-    
-    for name, node in sorted(node_dict.items()):
-        if node.get("type") == "file":
-            result.append(node)
-        else:
-            result.append({
-                "path": name + "/",
-                "type": "dir",
-                "children": _dict_to_list(node.get("children", {}))
-            })
-    
-    return result
+    # Sort files by symbol count descending, then name ascending
+    file_entries.sort(key=lambda x: (-x[1][1], x[0]))
+
+    # Render dirs first, then files
+    for dir_name, children in dirs:
+        lines.append(f"{prefix}{dir_name}/")
+        _render_node(children, lines, indent + 1)
+
+    for filename, (full_path, count, lang) in file_entries:
+        lang_suffix = f" {lang}" if lang else ""
+        lines.append(f"{prefix}{filename} ({count}){lang_suffix}")
