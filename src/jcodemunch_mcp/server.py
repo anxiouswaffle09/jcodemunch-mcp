@@ -181,14 +181,23 @@ class AutoRefresher:
                 last = self._last_refresh.get(path, 0.0)
                 if now - last < self._cooldown:
                     continue
-                self._last_refresh[path] = now
 
             path_lock = _get_path_lock(path)
-            if not path_lock.acquire(blocking=False):
-                _log.debug("autorefresh: %s already refreshing, skipping", path)
+            # Block until any in-progress refresh finishes so parallel tool
+            # calls never read a stale index.  Timeout prevents deadlocks.
+            if not path_lock.acquire(blocking=True, timeout=30):
+                _log.warning("autorefresh: %s lock timeout, skipping", path)
                 continue
 
             try:
+                # Re-check cooldown after acquiring the lock — another caller
+                # may have just completed a refresh while we were waiting.
+                with self._lock:
+                    last = self._last_refresh.get(path, 0.0)
+                    if time.monotonic() - last < self._cooldown:
+                        continue
+                    self._last_refresh[path] = time.monotonic()
+
                 _log.debug("autorefresh: refreshing %s", path)
                 result = index_folder(
                     path=path,
