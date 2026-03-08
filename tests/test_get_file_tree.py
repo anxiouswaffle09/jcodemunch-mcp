@@ -21,8 +21,8 @@ def _make_symbol(file: str, name: str, kind: str = "function",
     )
 
 
-def test_compact_output_contains_symbol_counts_and_language(tmp_path):
-    """Output should be a string with symbol counts and language per file."""
+def test_compact_output_contains_symbol_counts(tmp_path):
+    """Output should be compact text with symbol counts in parentheses."""
     store = IndexStore(base_path=str(tmp_path))
     syms = [
         _make_symbol("src/server.py", "handle_request"),
@@ -48,16 +48,16 @@ def test_compact_output_contains_symbol_counts_and_language(tmp_path):
     # Core assertion: tree is compact text, not a nested list
     assert isinstance(tree, str), f"Expected str, got {type(tree).__name__}"
 
-    # Symbol counts appear in the text
-    assert "2 symbols" in tree or "2 sym" in tree
-    assert "1 symbol" in tree or "1 sym" in tree
-
-    # Language tags appear
-    assert "python" in tree
+    # Symbol counts in parentheses format
+    assert "(2)" in tree
+    assert "(1)" in tree
 
     # File names appear
     assert "server.py" in tree
     assert "utils.py" in tree
+
+    # Monolingual repo: language labels should be suppressed
+    assert "python" not in tree
 
 
 def test_compact_output_hides_empty_files_by_default(tmp_path):
@@ -157,10 +157,10 @@ def test_compact_output_sorts_by_symbol_count_descending(tmp_path):
     )
 
 
-def test_compact_output_prefers_symbol_language_over_extension(tmp_path):
-    """A .h file with C symbols should show language='c', not inferred from extension."""
+def test_compact_output_shows_language_in_mixed_repos(tmp_path):
+    """In mixed-language repos, each file should show its language label."""
     store = IndexStore(base_path=str(tmp_path))
-    sym = Symbol(
+    c_sym = Symbol(
         id="include/api.h::only_c#function",
         file="include/api.h",
         name="only_c",
@@ -171,13 +171,17 @@ def test_compact_output_prefers_symbol_language_over_extension(tmp_path):
         byte_offset=0,
         byte_length=20,
     )
+    py_sym = _make_symbol("src/main.py", "main", language="python")
     store.save_index(
         owner="test_owner",
         name="test_repo",
-        source_files=["include/api.h"],
-        symbols=[sym],
-        raw_files={"include/api.h": "int only_c(void) { return 0; }\n"},
-        languages={"c": 1},
+        source_files=["include/api.h", "src/main.py"],
+        symbols=[c_sym, py_sym],
+        raw_files={
+            "include/api.h": "int only_c(void) { return 0; }\n",
+            "src/main.py": "def main(): ...\n",
+        },
+        languages={"c": 1, "python": 1},
     )
 
     result = get_file_tree("test_owner/test_repo", storage_path=str(tmp_path))
@@ -185,16 +189,52 @@ def test_compact_output_prefers_symbol_language_over_extension(tmp_path):
     tree = result["tree"]
     assert isinstance(tree, str)
 
-    # The line for api.h should contain language "c"
+    # Mixed repo: language labels should appear
     for line in tree.splitlines():
         if "api.h" in line:
-            # Should say "c" not "cpp" or "h"
-            assert "  c" in line or "\tc" in line or " c\n" in line or line.rstrip().endswith("c"), (
-                f"Expected language 'c' in line: {line!r}"
-            )
+            assert " c" in line, f"Expected language 'c' in line: {line!r}"
             break
     else:
         raise AssertionError("api.h not found in tree output")
+
+    for line in tree.splitlines():
+        if "main.py" in line:
+            assert " python" in line, f"Expected language 'python' in line: {line!r}"
+            break
+    else:
+        raise AssertionError("main.py not found in tree output")
+
+
+def test_compact_output_suppresses_language_in_monolingual_repos(tmp_path):
+    """In monolingual repos (>80% one language), language labels are suppressed."""
+    store = IndexStore(base_path=str(tmp_path))
+    syms = [
+        _make_symbol("src/a.py", "func_a"),
+        _make_symbol("src/b.py", "func_b"),
+        _make_symbol("src/c.py", "func_c"),
+    ]
+    store.save_index(
+        owner="test_owner",
+        name="test_repo",
+        source_files=["src/a.py", "src/b.py", "src/c.py"],
+        symbols=syms,
+        raw_files={
+            "src/a.py": "def func_a(): ...\n",
+            "src/b.py": "def func_b(): ...\n",
+            "src/c.py": "def func_c(): ...\n",
+        },
+        languages={"python": 3},
+    )
+
+    result = get_file_tree("test_owner/test_repo", storage_path=str(tmp_path))
+    assert "error" not in result
+    tree = result["tree"]
+
+    # All files should appear with counts
+    assert "(1)" in tree
+
+    # Language should NOT appear — repo is 100% python
+    assert "python" not in tree
 
 
 def test_path_prefix_filters_output(tmp_path):

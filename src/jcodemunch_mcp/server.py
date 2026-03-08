@@ -295,7 +295,7 @@ async def list_tools() -> list[Tool]:
         ),
         Tool(
             name="get_file_tree",
-            description="Get the file tree of an indexed repository as compact indented text. Each file shows its symbol count and language. Files sorted by symbol count (most important first). Zero-symbol files hidden by default.",
+            description="Get the file tree of an indexed repository as compact indented text. Each file shows its symbol count in parentheses, e.g. 'server.py (16)'. Language labels shown only in mixed-language repos. Files sorted by symbol count (most important first). Zero-symbol files hidden by default.",
             inputSchema={
                 "type": "object",
                 "properties": {

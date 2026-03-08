@@ -88,6 +88,20 @@ def get_file_tree(
     }
 
 
+def _majority_language(file_languages: dict[str, str]) -> str:
+    """Return the most common language, or '' if mixed/empty."""
+    if not file_languages:
+        return ""
+    counts: dict[str, int] = {}
+    for lang in file_languages.values():
+        counts[lang] = counts.get(lang, 0) + 1
+    majority = max(counts, key=counts.get)
+    # Only suppress if > 80% of files share the same language
+    if counts[majority] / len(file_languages) > 0.8:
+        return majority
+    return ""
+
+
 def _render_tree(
     files: list[str],
     path_prefix: str,
@@ -99,7 +113,11 @@ def _render_tree(
 
     Files are sorted by symbol count descending within each directory.
     Zero-symbol files are hidden unless show_empty is True.
+    Language is shown per file only when the repo has mixed languages.
     """
+    # Determine if language labels are needed (skip for monolingual repos)
+    majority = _majority_language(file_languages)
+
     root: dict = {}
 
     for file_path in files:
@@ -110,12 +128,14 @@ def _render_tree(
         rel_path = file_path[len(path_prefix):].lstrip("/")
         parts = rel_path.split("/")
 
-        # Get language
-        lang = file_languages.get(file_path, "")
-        if not lang:
-            _, ext = os.path.splitext(file_path)
-            from ..parser import LANGUAGE_EXTENSIONS
-            lang = LANGUAGE_EXTENSIONS.get(ext, "")
+        # Get language (only needed for mixed-language repos)
+        lang = ""
+        if not majority:
+            lang = file_languages.get(file_path, "")
+            if not lang:
+                _, ext = os.path.splitext(file_path)
+                from ..parser import LANGUAGE_EXTENSIONS
+                lang = LANGUAGE_EXTENSIONS.get(ext, "")
 
         # Navigate to parent dir
         current = root
@@ -158,6 +178,5 @@ def _render_node(node: dict, lines: list[str], indent: int) -> None:
         _render_node(children, lines, indent + 1)
 
     for filename, (full_path, count, lang) in file_entries:
-        symbol_label = "symbol" if count == 1 else "symbols"
-        lang_suffix = f"  {lang}" if lang else ""
-        lines.append(f"{prefix}{filename:<30} [{count} {symbol_label}]{lang_suffix}")
+        lang_suffix = f" {lang}" if lang else ""
+        lines.append(f"{prefix}{filename} ({count}){lang_suffix}")
